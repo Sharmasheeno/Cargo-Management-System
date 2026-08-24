@@ -371,7 +371,7 @@ h2 span {
   align-items: center;
 }
 #togglePasswordIcon{
-    margin-left:300px;
+    margin-left:250px;
 }
 .toggle-password:hover {
   color: var(--primary-purple);
