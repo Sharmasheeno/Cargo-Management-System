@@ -1,13 +1,25 @@
 <?php
 // staff/dashboard.php
 if (session_status() === PHP_SESSION_NONE) session_start();
-if (!isset($_SESSION['user_id']) || $_SESSION['role'] !== 'staff') {
+// NOTE: login.php stores the sub-role (role_type) into $_SESSION['role'] as an alias
+// ("For backward compatibility"), so a plain === 'staff' check only matches the generic
+// staff account and incorrectly locks out every staff sub-role (warehouse_supervisor,
+// logistics_supervisor, finance_manager, clerk). Check against the known staff role_types
+// instead, using role_type first and falling back to role for older sessions.
+$staff_role_types = ['staff', 'warehouse_supervisor', 'logistics_supervisor', 'finance_manager', 'clerk'];
+if (!isset($_SESSION['user_id']) || !in_array($_SESSION['role_type'] ?? $_SESSION['role'] ?? '', $staff_role_types, true)) {
     header("Location: ../login.php");
     exit;
 }
 require_once __DIR__ . '/../includes/header.php';
 ?>
 <div class="container-fluid">
+    <?php if (($_GET['error'] ?? '') === 'access_denied'): ?>
+        <div class="alert alert-danger alert-dismissible fade show" role="alert">
+            <i class="fas fa-ban"></i> You do not have permission to access that page.
+            <button type="button" class="close" data-dismiss="alert">&times;</button>
+        </div>
+    <?php endif; ?>
     <div class="d-flex justify-content-between align-items-center mb-4">
         <h2><i class="fas fa-users-cog text-info"></i> Staff Dashboard</h2>
     </div>

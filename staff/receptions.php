@@ -11,8 +11,13 @@ if (session_status() === PHP_SESSION_NONE) {
     session_start();
 }
 
-// Only staff accounts may access this page
-if (!isset($_SESSION['user_id']) || $_SESSION['role'] !== 'staff') {
+// Only staff accounts may access this page.
+// NOTE: login.php stores the sub-role (role_type) into $_SESSION['role'] as an alias, so a
+// plain === 'staff' check only matches the generic staff account and locks out every staff
+// sub-role (warehouse_supervisor, logistics_supervisor, finance_manager, clerk). Check
+// against the known staff role_types instead, using role_type first, role as fallback.
+$staff_role_types = ['staff', 'warehouse_supervisor', 'logistics_supervisor', 'finance_manager', 'clerk'];
+if (!isset($_SESSION['user_id']) || !in_array($_SESSION['role_type'] ?? $_SESSION['role'] ?? '', $staff_role_types, true)) {
     header("Location: ../login.php");
     exit;
 }
