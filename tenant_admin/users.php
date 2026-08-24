@@ -142,9 +142,19 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['ajax_action'])) {
                                         <?php
                                         $role_names = [
                                             'company_admin' => 'Company Admin',
+                                            'tenant_admin' => 'Tenant Admin',
+                                            'branch_manager' => 'Branch Manager',
                                             'staff' => 'Staff',
+                                            'reception_clerk' => 'Reception Clerk',
+                                            'warehouse_supervisor' => 'Warehouse Supervisor',
+                                            'logistics_supervisor' => 'Logistics Supervisor',
+                                            'finance_manager' => 'Finance Manager',
+                                            'clerk' => 'Clerk',
+                                            'driver' => 'Driver',
+                                            'delivery_agent' => 'Delivery Agent',
                                             'customer' => 'Customer'
                                         ];
+
                                         echo $role_names[$user['role_type']] ?? ucfirst($user['role_type']);
                                         ?>
                                     </span>
@@ -790,7 +800,15 @@ require_once __DIR__ . '/../includes/header.php';
                                 <label>Role</label>
                                 <select name="role_type" id="modalRole" class="form-control">
                                     <option value="company_admin">Company Admin</option>
+                                    <option value="branch_manager">Branch Manager</option>
                                     <option value="staff">Staff</option>
+                                    <option value="reception_clerk">Staff — Reception Clerk</option>
+                                    <option value="warehouse_supervisor">Staff — Warehouse Supervisor</option>
+                                    <option value="logistics_supervisor">Staff — Logistics Supervisor</option>
+                                    <option value="finance_manager">Staff — Finance Manager</option>
+                                    <option value="clerk">Staff — Clerk</option>
+                                    <option value="driver">Driver</option>
+                                    <option value="delivery_agent">Delivery Agent / Courier</option>
                                     <option value="customer">Customer</option>
                                 </select>
                             </div>

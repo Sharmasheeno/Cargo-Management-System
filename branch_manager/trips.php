@@ -209,13 +209,28 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['ajax_action'])) {
                         </td>
                         <td><small><?= h($r['from_branch_name'] ?? '-') ?> &rarr; <?= h($r['to_branch_name'] ?? '-') ?></small></td>
                         <td><?= number_format((float)($r['total_cbm'] ?? 0), 2) ?></td>
-                        <td><span class="badge" style="background:<?= h($color) ?>20;color:<?= h($color) ?>;border:1px solid <?= h($color) ?>"><?= h($label) ?></span></td>
+                        <td>
+                            <span class="badge" style="background:<?= h($color) ?>20;color:<?= h($color) ?>;border:1px solid <?= h($color) ?>"><?= h($label) ?></span>
+                            <?php
+                            // Dispatch approval state (Branch Manager gate)
+                            $appr = $r['approval_status'] ?? 'not_required';
+                            if ($appr === 'pending_approval'): ?>
+                                <br><small class="badge badge-warning mt-1"><i class="fas fa-hourglass-half"></i> Awaiting Approval</small>
+                            <?php elseif ($appr === 'approved'): ?>
+                                <br><small class="badge badge-success mt-1"><i class="fas fa-check-circle"></i> Dispatch Approved</small>
+                            <?php elseif ($appr === 'rejected'): ?>
+                                <br><small class="badge badge-danger mt-1"><i class="fas fa-ban"></i> Dispatch Rejected</small>
+                            <?php endif; ?>
+                        </td>
                         <td>
                             <button class="btn btn-sm btn-info view-trip" data-id="<?= (int)$r['id'] ?>" title="View"><i class="fas fa-eye"></i></button>
                             <?php if ($r['status'] !== 'completed'): ?>
                                 <button class="btn btn-sm btn-primary advance-trip" data-id="<?= (int)$r['id'] ?>" data-status="<?= h($r['status']) ?>" title="Advance Status"><i class="fas fa-forward"></i></button>
                             <?php endif; ?>
                             <button class="btn btn-sm btn-secondary edit-trip" data-id="<?= (int)$r['id'] ?>" title="Edit Driver/Truck"><i class="fas fa-edit"></i></button>
+                            <?php if (($r['approval_status'] ?? '') === 'pending_approval' && !in_array($r['status'], ['in_transit','delivered','completed'], true)): ?>
+                                <button class="btn btn-sm btn-success approve-dispatch" data-id="<?= (int)$r['id'] ?>" title="Approve Dispatch"><i class="fas fa-clipboard-check"></i> Approve</button>
+                            <?php endif; ?>
                         </td>
                     </tr>
                 <?php endforeach; else: ?>
@@ -364,6 +379,22 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['ajax_action'])) {
                 jsonOut(['success' => false, 'message' => 'Cannot move status backward or repeat current status.']);
             }
 
+            // Dispatch approval gate: a trip awaiting (or refused) Branch
+            // Manager approval may not depart the origin branch.
+            if ($new_status === 'in_transit') {
+                $apprStmt = $pdo->prepare("SELECT COALESCE(approval_status, 'not_required') FROM trucking_trips WHERE id = ?");
+                $apprStmt->execute([$id]);
+                $approval = (string)$apprStmt->fetchColumn();
+                if ($approval === 'pending_approval') {
+                    $pdo->rollBack();
+                    jsonOut(['success' => false, 'message' => 'Dispatch not yet approved by the Branch Manager. Approval is required before departure.']);
+                }
+                if ($approval === 'rejected') {
+                    $pdo->rollBack();
+                    jsonOut(['success' => false, 'message' => 'Dispatch was rejected by the Branch Manager. The trip cannot depart.']);
+                }
+            }
+
             $timeCol = null;
             if ($new_status === 'loaded') $timeCol = 'loaded_at';
             elseif ($new_status === 'in_transit') $timeCol = 'departed_at';
@@ -386,7 +417,66 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['ajax_action'])) {
         }
     }
 
+    // =====================================================================
+    // Dispatch approval (Branch Manager control, requirement #14).
+    // Validates before approval: container exists, manifest not empty,
+    // driver + truck assigned, origin branch correct.
+    // =====================================================================
+    if ($action === 'approve_dispatch' || $action === 'reject_dispatch') {
+        $id = postInt('id');
+        $decision = $action === 'approve_dispatch' ? 'approved' : 'rejected';
+
+        $stmt = $pdo->prepare("SELECT t.*, c.id AS c_id FROM trucking_trips t
+                               LEFT JOIN containers c ON c.id = t.container_id
+                               WHERE t.id = ? AND t.tenant_id = ? AND (t.branch_id = ? OR t.from_branch_id = ? OR t.to_branch_id = ?)
+                               FOR UPDATE");
+        $stmt->execute([$id, $tenant_id, $assigned_branch_id, $assigned_branch_id, $assigned_branch_id]);
+        $trip = $stmt->fetch(PDO::FETCH_ASSOC);
+        if (!$trip) jsonOut(['success' => false, 'message' => 'Trip not found in your branch.']);
+        if (in_array($trip['status'], ['in_transit','delivered','completed'], true)) {
+            jsonOut(['success' => false, 'message' => 'Trip has already departed; dispatch approval is no longer applicable.']);
+        }
+
+        if ($decision === 'rejected') {
+            $pdo->prepare("UPDATE trucking_trips SET approval_status = 'rejected', approved_by = ?, approved_at = NOW(), updated_at = NOW()
+                           WHERE id = ? AND tenant_id = ?")
+                ->execute([$_SESSION['user_id'] ?? null, $id, $tenant_id]);
+            jsonOut(['success' => true, 'message' => "Dispatch of {$trip['trip_number']} rejected. Operations must resolve issues before re-submitting."]);
+        }
+
+        // --- Pre-dispatch validation ---
+        $problems = [];
+        if (empty($trip['c_id'])) $problems[] = 'container missing';
+        if (empty($trip['from_branch_id'])) $problems[] = 'origin branch not set';
+        if (empty($trip['to_branch_id'])) $problems[] = 'destination branch not selected';
+        if (empty($trip['driver_name']) && empty($trip['driver_id'])) $problems[] = 'driver not assigned';
+        if (empty($trip['truck_plate'])) $problems[] = 'truck not assigned';
+        try {
+            require_once __DIR__ . '/../includes/shipment_functions.php';
+            $mi = $pdo->prepare("SELECT COALESCE(SUM(cmi.quantity),0) AS qty
+                                 FROM cargo_manifest_items cmi WHERE cmi.container_id = ?");
+            $mi->execute([$trip['container_id']]);
+            if ((int)$mi->fetchColumn() <= 0) $problems[] = 'manifest is empty';
+        } catch (Throwable $e) {}
+        if ($problems) {
+            jsonOut(['success' => false, 'message' => 'Cannot approve dispatch: ' . implode(', ', $problems) . '.']);
+        }
+
+        $pdo->prepare("UPDATE trucking_trips SET approval_status = 'approved', approved_by = ?, approved_at = NOW(), updated_at = NOW()
+                       WHERE id = ? AND tenant_id = ?")
+            ->execute([$_SESSION['user_id'] ?? null, $id, $tenant_id]);
+
+        // Audit trail on every shipment loaded on this container
+        try {
+            require_once __DIR__ . '/../includes/shipment_functions.php';
+            log_dispatch_approved($id, $tenant_id);
+        } catch (Throwable $e) {}
+
+        jsonOut(['success' => true, 'message' => "Dispatch of {$trip['trip_number']} approved. The trip may now depart."]);
+    }
+
     jsonOut(['success' => false, 'message' => 'Unknown action.']);
+
 }
 
 // -----------------------------------------------------
@@ -666,6 +756,15 @@ $('#editTripForm').on('submit', function(e) {
     $.post('', $(this).serialize(), function(res) {
         toast(res.message || (res.success ? 'Saved' : 'Error'));
         if (res.success) { $('#editTripModal').modal('hide'); loadTrips(currentPage); }
+    }, 'json').fail(function() { toast('Server error.'); });
+});
+
+$(document).on('click', '.approve-dispatch', function() {
+    const id = $(this).data('id');
+    if (!confirm('Approve dispatch of this trip? Validations (container, manifest, driver, truck) will be checked.')) return;
+    $.post('', { ajax_action: 'approve_dispatch', id: id }, function(res) {
+        toast(res.message || (res.success ? 'Approved' : 'Error'));
+        if (res.success) loadTrips(currentPage);
     }, 'json').fail(function() { toast('Server error.'); });
 });
 

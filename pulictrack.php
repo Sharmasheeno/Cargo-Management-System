@@ -6,12 +6,29 @@ if (session_status() === PHP_SESSION_NONE) {
 }
 
 require_once __DIR__ . '/config/db_connect.php';
+require_once __DIR__ . '/includes/shipment_functions.php';
 
 // Get tracking ID from URL
 $tracking_id = isset($_GET['id']) ? (int)$_GET['id'] : 0;
 $tracking_number = isset($_GET['tracking']) ? trim($_GET['tracking']) : '';
 $error = null;
 $shipment = null;
+
+// ---------------------------------------------------------------------------
+// NEW: master-shipment tracking (SHP-1001 / DEMO-MGQ-1001).
+// When the code matches a real shipment, show ONLY the derived operational
+// timeline (customer-safe). Internal financial notes, warehouse security
+// details and full internal manifests are never exposed here.
+// ---------------------------------------------------------------------------
+$shipment_view = null;
+if (!empty($tracking_number)) {
+    ensureShipmentSchema($pdo);
+    list($shipRow, $shipEvents) = get_shipment_tracking_timeline($tracking_number, null);
+    if ($shipRow) {
+        $shipment_view = ['shipment' => $shipRow, 'events' => $shipEvents];
+    }
+}
+?>
 
 // Get shipment by ID or tracking number
 if ($tracking_id > 0) {
@@ -416,7 +433,55 @@ function getCustomsBadge($status) {
         </form>
     </div>
 
-    <?php if ($error): ?>
+    <?php if ($shipment_view): ?>
+        <!-- ============================================================
+             MASTER SHIPMENT VIEW (customer-safe, derived from operational
+             truth). Shown when the tracking code matches SHP-xxxx or a
+             shipment tracking number. No internal manifests/financial data.
+             ============================================================ -->
+        <?php
+        $sv = $shipment_view['shipment'];
+        $statusLabel = customer_friendly_status($sv['current_status']);
+        ?>
+        <div class="shipment-card">
+            <div class="shipment-header">
+                <h2><i class="fas fa-box"></i> <?= htmlspecialchars((string)$sv['shipment_number']) ?></h2>
+                <span style="background:#28a745;color:#fff;padding:6px 16px;border-radius:20px;font-weight:600;">
+                    <?= htmlspecialchars($statusLabel) ?>
+                </span>
+            </div>
+            <div style="padding: 0 0 10px 20px; color:#555;">
+                <p><strong>Route:</strong>
+                    <?= htmlspecialchars((string)($sv['origin_name'] ?? '')) ?> &rarr;
+                    <?= htmlspecialchars((string)($sv['destination_name'] ?? '')) ?></p>
+                <p><strong>Cargo:</strong> <?= htmlspecialchars((string)($sv['cargo_description'] ?? '')) ?>
+                    &middot; <?= (int)$sv['quantity'] ?> pcs
+                    &middot; <?= htmlspecialchars((string)$sv['weight_kg']) ?> kg</p>
+            </div>
+            <div class="cargo-table">
+                <h4 style="margin-bottom: 15px; color: var(--curdun-violet); padding: 0 0 0 20px;">
+                    <i class="fas fa-route"></i> Taariikhda Alaabta
+                </h4>
+                <table>
+                    <thead><tr><th>Xaalad (Status)</th><th>Meesha (Location)</th><th>Waqtiga (Time)</th></tr></thead>
+                    <tbody>
+                    <?php foreach ($shipment_view['events'] as $e): ?>
+                        <tr>
+                            <td><?= htmlspecialchars(!empty($e['new_status']) ? customer_friendly_status($e['new_status']) : 'Update') ?></td>
+                            <td><?= htmlspecialchars((string)($e['location_label'] ?? '-')) ?></td>
+                            <td><?= htmlspecialchars((string)$e['created_at']) ?></td>
+                        </tr>
+                    <?php endforeach; ?>
+                    <?php if (empty($shipment_view['events'])): ?>
+                        <tr><td colspan="3" style="text-align:center;">Weli wax war ah lama diiwaan gelin.</td></tr>
+                    <?php endif; ?>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+
+    <?php elseif ($error): ?>
+
         <div class="alert-error">
             <i class="fas fa-exclamation-triangle" style="font-size: 48px; margin-bottom: 15px; display: block;"></i>
             <p style="font-size: 18px; font-weight: 600;"><?= htmlspecialchars($error) ?></p>

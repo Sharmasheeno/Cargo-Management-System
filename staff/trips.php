@@ -238,7 +238,17 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['ajax_action'])) {
                         </td>
                         <td><small><?= h($r['from_branch_name'] ?? '-') ?> &rarr; <?= h($r['to_branch_name'] ?? '-') ?></small></td>
                         <td><?= number_format((float)($r['total_cbm'] ?? 0), 2) ?></td>
-                        <td><span class="badge" style="background:<?= h($color) ?>20;color:<?= h($color) ?>;border:1px solid <?= h($color) ?>"><?= h($label) ?></span></td>
+                        <td>
+                            <span class="badge" style="background:<?= h($color) ?>20;color:<?= h($color) ?>;border:1px solid <?= h($color) ?>"><?= h($label) ?></span>
+                            <?php $appr = $r['approval_status'] ?? 'not_required';
+                            if ($appr === 'pending_approval'): ?>
+                                <br><small class="badge badge-warning mt-1"><i class="fas fa-hourglass-half"></i> Awaiting BM Approval</small>
+                            <?php elseif ($appr === 'approved'): ?>
+                                <br><small class="badge badge-success mt-1"><i class="fas fa-check-circle"></i> Approved</small>
+                            <?php elseif ($appr === 'rejected'): ?>
+                                <br><small class="badge badge-danger mt-1"><i class="fas fa-ban"></i> Rejected</small>
+                            <?php endif; ?>
+                        </td>
                         <td>
                             <button class="btn btn-sm btn-info view-trip" data-id="<?= (int)$r['id'] ?>" title="View"><i class="fas fa-eye"></i></button>
                             <?php if ($r['status'] !== 'completed'): ?>
@@ -333,17 +343,42 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['ajax_action'])) {
 
         try {
             $trip_number = 'TRP-' . date('ymd') . '-' . str_pad((string)random_int(1, 999), 3, '0', STR_PAD_LEFT);
+            // Branch policy: inter-branch trips require Branch Manager dispatch
+            // approval before they may depart. Intra-branch movements do not.
+            $approval_status = $to_branch_id && (int)$to_branch_id !== $assigned_branch_id ? 'pending_approval' : 'not_required';
             $stmt = $pdo->prepare("
                 INSERT INTO trucking_trips
-                (tenant_id, container_id, trip_number, total_cbm, status, driver_name, driver_phone, truck_plate, notes, from_branch_id, to_branch_id, branch_id, created_at)
-                VALUES (?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?, NOW())
+                (tenant_id, container_id, trip_number, total_cbm, status, driver_name, driver_phone, truck_plate, notes, from_branch_id, to_branch_id, branch_id, approval_status, created_at)
+                VALUES (?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?, ?, NOW())
             ");
             $stmt->execute([
                 $tenant_id, $container_id, $trip_number, $total_cbm,
                 $driver_name ?: null, $driver_phone ?: null, $truck_plate ?: null, $notes ?: null,
-                $assigned_branch_id, $to_branch_id, $assigned_branch_id
+                $assigned_branch_id, $to_branch_id, $assigned_branch_id, $approval_status
             ]);
-            jsonOut(['success' => true, 'message' => "Trip {$trip_number} created.", 'id' => (int)$pdo->lastInsertId()]);
+            $msg = "Trip {$trip_number} created.";
+            if ($approval_status === 'pending_approval') {
+                $msg .= ' Awaiting Branch Manager dispatch approval before departure.';
+            }
+
+            // Link the authenticated Driver account (requirement #16): match the
+            // entered driver name against active driver users of this tenant so
+            // Hassan sees the trip in his own portal.
+            $driver_id = null;
+            if ($driver_name !== '') {
+                try {
+                    $du = $pdo->prepare("SELECT id FROM users WHERE tenant_id = ? AND is_active = 1 AND role_type = 'driver' AND full_name LIKE ? LIMIT 1");
+                    $du->execute([$tenant_id, "%{$driver_name}%"]);
+                    $found = $du->fetchColumn();
+                    if ($found) {
+                        $driver_id = (int)$found;
+                        $pdo->prepare("UPDATE trucking_trips SET driver_id = ? WHERE trip_number = ? AND tenant_id = ?")
+                            ->execute([$driver_id, $trip_number, $tenant_id]);
+                    }
+                } catch (Throwable $e) {}
+            }
+
+            jsonOut(['success' => true, 'message' => $msg . ($driver_id ? " Assigned to driver account #{$driver_id}." : ''), 'id' => (int)$pdo->lastInsertId()]);
         } catch (Throwable $e) {
             jsonOut(['success' => false, 'message' => 'Error: ' . $e->getMessage()]);
         }
@@ -393,6 +428,22 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['ajax_action'])) {
                 jsonOut(['success' => false, 'message' => 'Cannot move status backward or repeat current status.']);
             }
 
+            // Dispatch approval gate: a trip awaiting (or refused) Branch
+            // Manager approval may not depart the origin branch.
+            if ($new_status === 'in_transit') {
+                $apprStmt = $pdo->prepare("SELECT COALESCE(approval_status, 'not_required') FROM trucking_trips WHERE id = ?");
+                $apprStmt->execute([$id]);
+                $approval = (string)$apprStmt->fetchColumn();
+                if ($approval === 'pending_approval') {
+                    $pdo->rollBack();
+                    jsonOut(['success' => false, 'message' => 'Dispatch not yet approved by the Branch Manager. Approval is required before departure.']);
+                }
+                if ($approval === 'rejected') {
+                    $pdo->rollBack();
+                    jsonOut(['success' => false, 'message' => 'Dispatch was rejected by the Branch Manager. The trip cannot depart.']);
+                }
+            }
+
             $timeCol = null;
             if ($new_status === 'loaded') $timeCol = 'loaded_at';
             elseif ($new_status === 'in_transit') $timeCol = 'departed_at';
@@ -407,7 +458,15 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['ajax_action'])) {
                     ->execute([$new_status, $id, $tenant_id]);
             }
 
+            // --- Connected A→Z workflow: propagate the trip event onto every
+            // shipment actually loaded on this container so customer tracking
+            // updates automatically. Arrival never equals DELIVERED: shipments
+            // go to ARRIVED_AT_DESTINATION awaiting warehouse receipt.
+            require_once __DIR__ . '/../includes/shipment_functions.php';
+            propagate_trip_status_to_shipments($id, $new_status, ['tenant_id' => $tenant_id]);
+
             $pdo->commit();
+
             jsonOut(['success' => true, 'message' => 'Trip status updated.']);
         } catch (Throwable $e) {
             if ($pdo->inTransaction()) $pdo->rollBack();

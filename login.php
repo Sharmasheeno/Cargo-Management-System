@@ -158,13 +158,19 @@ function getDashboardRedirect($role) {
         'branches_admin' => 'branches_admin/dashboard.php',
         'staff' => 'staff/dashboard.php',
         'customer' => 'customer/dashboard.php',
+        // Authenticated operational roles with their own portals
+        'driver' => 'driver/index.php',
+        'delivery_agent' => 'driver/index.php',
     ];
     
     // Special handling for staff role types
-    if ($role === 'staff') {
+    if ($role === 'staff' || in_array($role, [
+            'reception_clerk', 'warehouse_supervisor', 'logistics_supervisor',
+            'finance_manager', 'clerk', 'loader', 'dispatcher'
+        ], true)) {
         return 'staff/dashboard.php';
     }
-    
+
     return $redirects[$role] ?? 'staff/dashboard.php';
 }
 

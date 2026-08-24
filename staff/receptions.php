@@ -16,7 +16,8 @@ if (session_status() === PHP_SESSION_NONE) {
 // plain === 'staff' check only matches the generic staff account and locks out every staff
 // sub-role (warehouse_supervisor, logistics_supervisor, finance_manager, clerk). Check
 // against the known staff role_types instead, using role_type first, role as fallback.
-$staff_role_types = ['staff', 'warehouse_supervisor', 'logistics_supervisor', 'finance_manager', 'clerk'];
+$staff_role_types = ['staff', 'reception_clerk', 'warehouse_supervisor', 'logistics_supervisor', 'finance_manager', 'clerk'];
+
 if (!isset($_SESSION['user_id']) || !in_array($_SESSION['role_type'] ?? $_SESSION['role'] ?? '', $staff_role_types, true)) {
     header("Location: ../login.php");
     exit;
@@ -361,7 +362,34 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['ajax_action'])) {
                     $declared_value, $origin, $destination, $status, $branch_name, $assigned_branch_id,
                     $received_date, $delivered_date, $notes, $user_id
                 ]);
-                json_response(['success' => true, 'message' => "Reception '$tracking_number' recorded successfully", 'id' => (int)$pdo->lastInsertId()]);
+                $new_package_id = (int)$pdo->lastInsertId();
+
+                // --- Connected A→Z workflow: give every intake a master shipment
+                // identity (SHP-xxxx + DEMO-MGQ-1001 style tracking) so reception,
+                // warehouse, containers, trips and customer tracking all stay linked.
+                require_once __DIR__ . '/../includes/shipment_functions.php';
+                ensureShipmentSchema($pdo);
+                create_shipment_from_reception(
+                    array_merge($_POST, [
+                        'id' => $new_package_id,
+                        'customer_id' => $customer_id ?: null,
+                        'customer_name' => $customer_name,
+                        'customer_phone' => $customer_phone,
+                        'package_name' => $package_name,
+                        'package_type' => $package_type,
+                        'weight_kg' => $weight_kg,
+                        'volume_cbm' => $volume_cbm,
+                        'declared_value' => $declared_value,
+                        'status' => $status,
+                        'current_location' => $branch_name,
+                    ]),
+                    $tenant_id,
+                    $assigned_branch_id,
+                    (int)($_POST['destination_branch_id'] ?? 0) ?: null
+                );
+
+                json_response(['success' => true, 'message' => "Reception '$tracking_number' recorded successfully", 'id' => $new_package_id]);
+
             } else {
                 $id = (int)$id;
                 $existing = $pdo->prepare("SELECT status, received_date, delivered_date FROM packages WHERE id = ? AND tenant_id = ? AND current_branch_id = ? LIMIT 1");

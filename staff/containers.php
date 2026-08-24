@@ -427,17 +427,36 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['ajax_action'])) {
             $stmt->execute([$new_status, $id, $tenant_id, $assigned_branch_id]);
 
             // Keep any linked trucking trip roughly in sync
+            $syncedTripStatus = null;
             try {
                 if ($new_status === 'loaded') {
                     $pdo->prepare("UPDATE trucking_trips SET status = 'loaded', loaded_at = NOW() WHERE container_id = ? AND tenant_id = ?")->execute([$id, $tenant_id]);
+                    $syncedTripStatus = 'loaded';
                 } elseif ($new_status === 'shipped' || $new_status === 'dispatched') {
                     $pdo->prepare("UPDATE trucking_trips SET status = 'in_transit', departed_at = NOW() WHERE container_id = ? AND tenant_id = ?")->execute([$id, $tenant_id]);
+                    $syncedTripStatus = 'in_transit';
                 } elseif ($new_status === 'delivered') {
                     $pdo->prepare("UPDATE trucking_trips SET status = 'completed', delivered_at = NOW() WHERE container_id = ? AND tenant_id = ?")->execute([$id, $tenant_id]);
+                    $syncedTripStatus = 'completed';
+                }
+            } catch (Throwable $e) {}
+
+            // --- Connected A→Z workflow: propagate onto loaded shipments so the
+            // customer tracking reflects container/trip movement automatically.
+            try {
+                require_once __DIR__ . '/../includes/shipment_functions.php';
+                if ($syncedTripStatus !== null) {
+                    $tid = $pdo->prepare("SELECT id FROM trucking_trips WHERE container_id = ? AND tenant_id = ? ORDER BY id DESC LIMIT 1");
+                    $tid->execute([$id, $tenant_id]);
+                    $tripId = (int)$tid->fetchColumn();
+                    if ($tripId > 0) {
+                        propagate_trip_status_to_shipments($tripId, $syncedTripStatus, ['tenant_id' => $tenant_id]);
+                    }
                 }
             } catch (Throwable $e) {}
 
             $pdo->commit();
+
             jsonOut(['success' => true, 'message' => 'Container status updated.']);
         } catch (Throwable $e) {
             if ($pdo->inTransaction()) $pdo->rollBack();
