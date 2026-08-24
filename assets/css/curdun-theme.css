@@ -1,0 +1,369 @@
+/* ==========================================================================
+   CURDUN ICT SOLUTION — Shared Design System
+   Loaded AFTER Bootstrap/Font Awesome on every page that includes it.
+
+   Cascade note: this file cannot override hardcoded hex values written
+   directly inside a page's own inline <style> block if that block is
+   loaded later in the document (same-specificity, later-in-DOM wins).
+   Those cases are fixed at the source, file by file — not with !important.
+   ========================================================================== */
+
+:root {
+    --curdun-purple: #2D1859;
+    --curdun-purple-light: #4B2C85;
+    --curdun-purple-dark: #1F0F3D;
+    --curdun-gold: #F5C410;
+    --curdun-gold-dark: #D4A70C;
+
+    --curdun-background: #F4F5F9;
+    --curdun-surface: #FFFFFF;
+
+    --curdun-border: #E9E7F1;
+    --curdun-soft-purple: #F0EEF7;
+
+    --curdun-text: #1B1233;
+    --curdun-text-secondary: #69647A;
+
+    --curdun-success: #0F7A3A;
+    --curdun-success-bg: #EEFBF3;
+    --curdun-success-border: #B7EBCA;
+
+    --curdun-danger: #B42318;
+    --curdun-danger-bg: #FEF0EE;
+    --curdun-danger-border: #FDA29B;
+
+    --curdun-warning: #B77900;
+    --curdun-warning-bg: #FFF8E1;
+
+    --curdun-radius-sm: 8px;
+    --curdun-radius-md: 10px;
+    --curdun-radius-lg: 16px;
+}
+
+/* ==========================================================================
+   Base
+   ========================================================================== */
+body {
+    background: var(--curdun-background);
+    color: var(--curdun-text);
+}
+
+/* Content-scoped links only — never a blanket `a { color }`, which would
+   make links unreadable inside the purple sidebar/header, alerts, badges,
+   or gold buttons. */
+.main-content a,
+.card a,
+.premium-table a,
+.table a,
+.modal-body a {
+    color: var(--curdun-purple);
+}
+.main-content a:hover,
+.card a:hover,
+.premium-table a:hover,
+.table a:hover,
+.modal-body a:hover {
+    color: var(--curdun-purple-light);
+}
+
+/* ==========================================================================
+   Cards
+   ========================================================================== */
+.card {
+    background: var(--curdun-surface);
+    border: 1px solid var(--curdun-border);
+    border-radius: var(--curdun-radius-lg);
+    box-shadow: none;
+}
+.card-header {
+    background: var(--curdun-surface);
+    border-bottom: 1px solid var(--curdun-border);
+    color: var(--curdun-text);
+    font-weight: 700;
+}
+
+/* ==========================================================================
+   Buttons — full interactive states so Bootstrap blue never leaks through
+   on hover/focus/active either.
+   ========================================================================== */
+.btn {
+    border-radius: var(--curdun-radius-md);
+    font-weight: 600;
+}
+
+.btn-primary {
+    background-color: var(--curdun-gold);
+    border-color: var(--curdun-gold);
+    color: var(--curdun-text);
+}
+.btn-primary:hover,
+.btn-primary:focus {
+    background-color: var(--curdun-gold-dark);
+    border-color: var(--curdun-gold-dark);
+    color: var(--curdun-text);
+}
+.btn-primary:active {
+    background-color: var(--curdun-gold-dark) !important;
+    border-color: var(--curdun-gold-dark) !important;
+    color: var(--curdun-text) !important;
+}
+.btn-primary:focus {
+    box-shadow: 0 0 0 0.2rem rgba(245, 196, 16, 0.35);
+}
+.btn-primary:disabled,
+.btn-primary.disabled {
+    background-color: var(--curdun-gold);
+    border-color: var(--curdun-gold);
+    opacity: 0.55;
+}
+
+.btn-secondary,
+.btn-outline-secondary {
+    background-color: var(--curdun-purple);
+    border-color: var(--curdun-purple);
+    color: #FFFFFF;
+}
+.btn-secondary:hover,
+.btn-secondary:focus,
+.btn-outline-secondary:hover,
+.btn-outline-secondary:focus {
+    background-color: var(--curdun-purple-light);
+    border-color: var(--curdun-purple-light);
+    color: #FFFFFF;
+}
+.btn-secondary:active,
+.btn-outline-secondary:active {
+    background-color: var(--curdun-purple-dark) !important;
+    border-color: var(--curdun-purple-dark) !important;
+    color: #FFFFFF !important;
+}
+.btn-secondary:focus,
+.btn-outline-secondary:focus {
+    box-shadow: 0 0 0 0.2rem rgba(45, 24, 89, 0.25);
+}
+
+.btn-outline-primary {
+    background-color: transparent;
+    border-color: var(--curdun-purple);
+    color: var(--curdun-purple);
+}
+.btn-outline-primary:hover,
+.btn-outline-primary:focus {
+    background-color: var(--curdun-purple);
+    border-color: var(--curdun-purple);
+    color: #FFFFFF;
+}
+
+.btn-success {
+    background-color: var(--curdun-success);
+    border-color: var(--curdun-success);
+}
+.btn-success:hover,
+.btn-success:focus {
+    background-color: #0C5F2E;
+    border-color: #0C5F2E;
+}
+
+.btn-danger {
+    background-color: var(--curdun-danger);
+    border-color: var(--curdun-danger);
+}
+.btn-danger:hover,
+.btn-danger:focus {
+    background-color: #8F1B12;
+    border-color: #8F1B12;
+}
+
+/* ==========================================================================
+   Badges
+   ========================================================================== */
+.badge-primary {
+    background-color: var(--curdun-soft-purple);
+    color: var(--curdun-purple);
+}
+.badge-success {
+    background-color: var(--curdun-success-bg);
+    color: var(--curdun-success);
+    border: 1px solid var(--curdun-success-border);
+}
+.badge-danger {
+    background-color: var(--curdun-danger-bg);
+    color: var(--curdun-danger);
+    border: 1px solid var(--curdun-danger-border);
+}
+.badge-warning {
+    background-color: var(--curdun-warning-bg);
+    color: var(--curdun-warning);
+}
+
+/* Compact status pill utility — opt-in, not force-applied to existing markup */
+.status-pill {
+    display: inline-flex;
+    align-items: center;
+    padding: 4px 12px;
+    border-radius: 999px;
+    font-size: 12px;
+    font-weight: 700;
+    letter-spacing: 0.02em;
+}
+.status-pill.success {
+    background: var(--curdun-success-bg);
+    color: var(--curdun-success);
+    border: 1px solid var(--curdun-success-border);
+}
+.status-pill.danger {
+    background: var(--curdun-danger-bg);
+    color: var(--curdun-danger);
+    border: 1px solid var(--curdun-danger-border);
+}
+.status-pill.warning {
+    background: var(--curdun-warning-bg);
+    color: var(--curdun-warning);
+}
+
+/* ==========================================================================
+   Alerts
+   ========================================================================== */
+.alert-primary {
+    background-color: var(--curdun-soft-purple);
+    border-color: var(--curdun-border);
+    color: var(--curdun-purple);
+}
+.alert-success {
+    background-color: var(--curdun-success-bg);
+    border-color: var(--curdun-success-border);
+    color: var(--curdun-success);
+}
+.alert-danger {
+    background-color: var(--curdun-danger-bg);
+    border-color: var(--curdun-danger-border);
+    color: var(--curdun-danger);
+}
+.alert-warning {
+    background-color: var(--curdun-warning-bg);
+    border-color: #F5E3A8;
+    color: var(--curdun-warning);
+}
+
+/* ==========================================================================
+   Tables
+   ========================================================================== */
+.table thead th,
+.premium-table thead tr {
+    background-color: var(--curdun-background);
+    color: var(--curdun-text-secondary);
+    border-bottom: 1px solid var(--curdun-border);
+    text-transform: uppercase;
+    font-size: 11px;
+    letter-spacing: 0.06em;
+    font-weight: 700;
+}
+.table td,
+.table th {
+    border-color: var(--curdun-border);
+}
+
+/* ==========================================================================
+   Forms
+   ========================================================================== */
+.form-control,
+.custom-select {
+    border: 1px solid #D9D5E5;
+    border-radius: var(--curdun-radius-md);
+    color: var(--curdun-text);
+}
+.form-control:focus,
+.custom-select:focus {
+    border-color: var(--curdun-purple);
+    box-shadow: 0 0 0 0.2rem rgba(45, 24, 89, 0.15);
+}
+.form-check-input:checked {
+    background-color: var(--curdun-purple);
+    border-color: var(--curdun-purple);
+}
+label {
+    color: var(--curdun-text);
+    font-weight: 600;
+}
+
+/* ==========================================================================
+   Pagination
+   ========================================================================== */
+.page-link {
+    color: var(--curdun-purple);
+}
+.page-link:hover,
+.page-link:focus {
+    color: var(--curdun-purple-light);
+    background-color: var(--curdun-soft-purple);
+}
+.page-item.active .page-link {
+    background-color: var(--curdun-purple);
+    border-color: var(--curdun-purple);
+    color: #FFFFFF;
+}
+.page-item.disabled .page-link {
+    color: var(--curdun-text-secondary);
+}
+
+/* ==========================================================================
+   Dropdowns / Tabs
+   ========================================================================== */
+.dropdown-item:hover,
+.dropdown-item:focus {
+    background-color: var(--curdun-soft-purple);
+    color: var(--curdun-purple);
+}
+.dropdown-item.active,
+.dropdown-item:active {
+    background-color: var(--curdun-purple);
+    color: #FFFFFF;
+}
+.nav-tabs .nav-link.active {
+    color: var(--curdun-purple);
+    border-color: var(--curdun-border) var(--curdun-border) #fff;
+    border-bottom: 2px solid var(--curdun-purple);
+}
+.nav-tabs .nav-link:hover {
+    border-color: transparent;
+    color: var(--curdun-purple);
+}
+
+/* ==========================================================================
+   Modals
+   ========================================================================== */
+.modal-content {
+    border-radius: var(--curdun-radius-lg);
+    border: none;
+}
+.modal-header {
+    border-bottom: 1px solid var(--curdun-border);
+}
+.modal-footer {
+    border-top: 1px solid var(--curdun-border);
+}
+
+/* ==========================================================================
+   KPI utility (opt-in)
+   ========================================================================== */
+.curdun-kpi {
+    background: var(--curdun-surface);
+    border: 1px solid var(--curdun-border);
+    border-radius: var(--curdun-radius-lg);
+    padding: 22px;
+}
+.curdun-kpi .kpi-label {
+    font-size: 12px;
+    font-weight: 700;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--curdun-text-secondary);
+}
+.curdun-kpi.curdun-kpi-primary {
+    background: var(--curdun-purple);
+    border-color: var(--curdun-purple);
+    color: #FFFFFF;
+}
+.curdun-kpi.curdun-kpi-primary .kpi-label {
+    color: var(--curdun-gold);
+}

@@ -1,0 +1,21 @@
+:root{
+    --hu-green:#009639;--hu-light:#f7faf8;--hu-white:#fff;--hu-gray:#eaeaea;
+   }
+   body{font-family:"Segoe UI",sans-serif;background:var(--hu-light);padding:40px;margin:0;}
+   .edit-container{display:flex;gap:30px;max-width:950px;margin:auto;background:var(--hu-white);box-shadow:0 4px 12px rgba(0,0,0,0.1);border-radius:10px;overflow:hidden;flex-wrap:wrap;}
+   .profile-card{flex:1 1 280px;background:var(--hu-green);color:#fff;text-align:center;padding:30px 20px;}
+   .profile-card .avatar{width:120px;height:120px;border-radius:50%;border:3px solid #fff;object-fit:cover;}
+   .upload-btn{background:#fff;color:var(--hu-green);padding:8px 14px;border-radius:6px;font-weight:600;cursor:pointer;display:inline-block;margin:15px 0;}
+   .profile-form{flex:2 1 500px;padding:30px 40px;}
+   .profile-form h2{color:var(--hu-green);margin-bottom:15px;border-bottom:2px solid var(--hu-green);display:inline-block;}
+   .profile-form label{display:block;font-weight:600;margin-top:12px;}
+   .profile-form input{width:100%;padding:10px;border:1px solid #ccc;border-radius:6px;margin-top:4px;}
+   .form-row{display:flex;gap:15px;} .form-row > div{flex:1;}
+   .form-actions{margin-top:25px;display:flex;gap:10px;}
+   .save-btn{background:var(--hu-green);color:#fff;border:none;padding:10px 18px;border-radius:6px;cursor:pointer;}
+   .cancel-btn{text-decoration:none;background:var(--hu-gray);padding:10px 18px;border-radius:6px;color:#000;}
+   .alert{padding:10px;border-radius:6px;margin-bottom:15px;}
+   .alert.success{background:#e8fcef;color:var(--hu-green);border:1px solid #b6e2c0;}
+   .alert.error{background:#ffecec;color:#c62828;border:1px solid #f5b5b5;}
+   @media(max-width:768px){.edit-container{flex-direction:column;padding:10px;}.profile-form{padding:20px;}}
+   

@@ -1,0 +1,24 @@
+# Secrets - never commit real credentials
+config/secrets.php
+
+# Dependencies
+/vendor/
+
+# User-uploaded content
+/uploads/*
+!/uploads/.gitkeep
+
+# Logs and caches
+/cache
+*.log
+config/error_log
+
+# Scratch/debug scripts and agent workspace, not part of the app
+/scratch/
+/brain/
+
+# OS / editor files
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

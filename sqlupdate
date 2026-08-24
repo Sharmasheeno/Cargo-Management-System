@@ -1,0 +1,28 @@
+ALTER TABLE invoices 
+MODIFY COLUMN status enum('draft','sent','partially_paid','paid','overdue','cancelled') DEFAULT 'draft';
+
+CREATE TABLE IF NOT EXISTS template_messages (
+            id INT NOT NULL AUTO_INCREMENT,
+            tenant_id INT NULL,
+            template_name VARCHAR(150) NOT NULL,
+            template_key VARCHAR(150) NOT NULL,
+            channel ENUM('whatsapp','sms','email','system') NOT NULL DEFAULT 'whatsapp',
+            category VARCHAR(80) NOT NULL DEFAULT 'general',
+            subject VARCHAR(190) NULL,
+            message_body TEXT NOT NULL,
+            variables TEXT NULL,
+            language VARCHAR(20) NOT NULL DEFAULT 'so',
+            is_default TINYINT(1) NOT NULL DEFAULT 0,
+            is_active TINYINT(1) NOT NULL DEFAULT 1,
+            created_by INT NULL,
+            updated_by INT NULL,
+            created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP NULL DEFAULT NULL ON UPDATE CURRENT_TIMESTAMP,
+            PRIMARY KEY (id),
+            UNIQUE KEY uq_template_tenant_key (tenant_id, template_key),
+            KEY idx_template_tenant (tenant_id),
+            KEY idx_template_channel (channel),
+            KEY idx_template_category (category),
+            KEY idx_template_active (is_active)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+  
