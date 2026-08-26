@@ -960,14 +960,18 @@ body.sidebar-collapsed .main-content {
       <!-- ==================== STAFF SIDEBAR ==================== -->
       <li><a href="../staff/dashboard.php" class="<?= $currentPage == 'dashboard.php' ? 'active' : '' ?>"><i class="fa-solid fa-house"></i><span>Dashboard</span></a></li>
       <li><a href="../staff/shipments.php"><i class="fa-solid fa-boxes-stacked"></i><span>Shipments</span></a></li>
-      <li><a href="../staff/receptions.php"><i class="fa-solid fa-clipboard-check"></i><span>Receptions</span></a></li>
+      <?php if ($role_type !== 'warehouse_supervisor'): ?>
+        <!-- Receptions is origin/customer intake; destination warehouse supervisor doesn't use it. -->
+        <li><a href="../staff/receptions.php"><i class="fa-solid fa-clipboard-check"></i><span>Receptions</span></a></li>
+      <?php endif; ?>
       <?php if ($role_type === 'warehouse_supervisor' || $role_type === 'logistics_supervisor' || $role_type === 'clerk'): ?>
         <li><a href="../staff/incoming_trips.php"><i class="fa-solid fa-truck-ramp-box"></i><span>Incoming Trips</span></a></li>
       <?php endif; ?>
       <li><a href="../staff/warehouse_stock.php"><i class="fa-solid fa-warehouse"></i><span>Warehouse Stock</span></a></li>
       <li><a href="../staff/stock_movements.php"><i class="fa-solid fa-right-left"></i><span>Stock Movements</span></a></li>
 
-      <?php if ($role_type === 'warehouse_supervisor' || $role_type === 'logistics_supervisor'): ?>
+      <?php if ($role_type === 'logistics_supervisor'): ?>
+        <!-- Trip / Container management belongs to logistics, not destination warehouse. -->
         <li><a href="../staff/trips.php"><i class="fa-solid fa-road"></i><span>Trips</span></a></li>
         <li><a href="../staff/containers.php"><i class="fa-solid fa-truck-loading"></i><span>Containers</span></a></li>
       <?php endif; ?>
