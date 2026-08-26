@@ -45,8 +45,8 @@ $caps = [
     'receive'         => in_array($current_role_type, ['warehouse_supervisor'], true),
     'mark_ready'      => in_array($current_role_type, ['warehouse_supervisor'], true),
     'load'            => in_array($current_role_type, ['logistics_supervisor'], true),
-    'release_pickup'  => in_array($current_role_type, ['warehouse_supervisor', 'clerk'], true),
-    'assign_delivery' => in_array($current_role_type, ['warehouse_supervisor', 'logistics_supervisor', 'clerk'], true),
+    'release_pickup'  => in_array($current_role_type, ['warehouse_supervisor'], true),
+    'assign_delivery' => in_array($current_role_type, ['warehouse_supervisor'], true),
 
     'report_problem'  => in_array($current_role_type, ['warehouse_supervisor', 'logistics_supervisor'], true),
     'close'           => in_array($current_role_type, ['finance_manager'], true),
@@ -55,6 +55,14 @@ $caps = [
 /** Common event context for the current performer. */
 function ctxBase(): array {
     return ['performed_by' => $_SESSION['user_id'] ?? null, 'performer_name' => $_SESSION['user_name'] ?? null];
+}
+
+/** Normalize domain-service `ok` results to the AJAX/UI `success` contract. */
+function jsonResult(array $result): void {
+    if (!array_key_exists('success', $result) && array_key_exists('ok', $result)) {
+        $result['success'] = (bool)$result['ok'];
+    }
+    jsonOut($result);
 }
 
 // ============================================================================
@@ -83,12 +91,15 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['ajax_action'])) {
         $total = (int)$cStmt->fetchColumn();
         $dStmt = $pdo->prepare("
             SELECT s.* , c.container_number, t.trip_number,
-                   ob.branch_name AS origin_name, db.branch_name AS destination_name
+                   ob.branch_name AS origin_name, db.branch_name AS destination_name,
+                   ws.zone AS active_zone, ws.bin_location AS active_storage_location
             FROM shipments s
             LEFT JOIN containers c ON c.id = s.current_container_id
             LEFT JOIN trucking_trips t ON t.id = s.current_trip_id
             LEFT JOIN branches ob ON ob.id = s.origin_branch_id
             LEFT JOIN branches db ON db.id = s.destination_branch_id
+            LEFT JOIN warehouse_stock ws ON ws.id = s.current_warehouse_stock_id
+                AND ws.tenant_id = s.tenant_id AND ws.quantity > 0 AND COALESCE(ws.is_active,1) = 1
             {$whereSql}
             ORDER BY s.created_at DESC, s.id DESC LIMIT {$limit} OFFSET {$offset}");
         $dStmt->execute($params);
@@ -99,13 +110,18 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['ajax_action'])) {
     if ($action === 'get_shipment') {
         $id = postInt('id');
         $st = $pdo->prepare("SELECT s.*, ob.branch_name AS origin_name, db.branch_name AS destination_name,
-                                    c.container_number, t.trip_number, cu.customer_name, cu.phone AS customer_phone
+                                    c.container_number, c.status AS container_status,
+                                    t.trip_number, t.status AS trip_status, t.driver_name, t.driver_phone, t.truck_plate,
+                                    cu.customer_name, cu.phone AS customer_phone,
+                                    ws.zone AS current_stock_zone, ws.bin_location AS current_stock_location,
+                                    ws.quantity AS current_stock_qty, ws.is_active AS current_stock_active
                              FROM shipments s
                              LEFT JOIN branches ob ON ob.id = s.origin_branch_id
                              LEFT JOIN branches db ON db.id = s.destination_branch_id
                              LEFT JOIN containers c ON c.id = s.current_container_id
                              LEFT JOIN trucking_trips t ON t.id = s.current_trip_id
                              LEFT JOIN customers cu ON cu.id = s.customer_id
+                             LEFT JOIN warehouse_stock ws ON ws.id = s.current_warehouse_stock_id AND ws.tenant_id = s.tenant_id
                              WHERE s.id = ? AND s.tenant_id = ?
                                AND (s.current_branch_id = ? OR s.origin_branch_id = ? OR s.destination_branch_id = ?)");
         $st->execute([$id, $tenant_id, $assigned_branch_id, $assigned_branch_id, $assigned_branch_id]);
@@ -129,22 +145,22 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['ajax_action'])) {
     if ($action === 'receive_warehouse') {
         if (!$caps['receive']) access_denied_redirect();
         $id = postInt('id');
-        $zone = postStr('zone'); $rack = postStr('rack');
-        if ($zone === '' || $rack === '') jsonOut(['success' => false, 'message' => 'Zone and rack are required.']);
+        $zone = postStr('zone'); $storage_location = postStr('storage_location');
+        if ($zone === '' || $storage_location === '') jsonOut(['success' => false, 'message' => 'Zone and storage location are required.']);
         $st = $pdo->prepare("SELECT origin_branch_id FROM shipments WHERE id = ? AND tenant_id = ?");
         $st->execute([$id, $tenant_id]);
         $origin = (int)$st->fetchColumn();
         if ($origin !== $assigned_branch_id) jsonOut(['success' => false, 'message' => 'This shipment does not originate from your branch warehouse.']);
-        $res = receive_shipment_into_warehouse($id, $assigned_branch_id, $zone, $rack,
-            array_merge($ctxBase(), ['tenant_id' => $tenant_id, 'branch_name' => $branches_map[$assigned_branch_id] ?? '']));
-        jsonOut($res);
+        $res = receive_shipment_into_warehouse($id, $assigned_branch_id, $zone, $storage_location,
+            array_merge(ctxBase(), ['tenant_id' => $tenant_id, 'branch_name' => $branches_map[$assigned_branch_id] ?? '']));
+        jsonResult($res);
     }
 
     // ---- Ready for loading (Yusuf) ----------------------------------------
     if ($action === 'mark_ready') {
         if (!$caps['mark_ready']) access_denied_redirect();
         $id = postInt('id');
-        jsonOut(update_shipment_status($id, 'READY_FOR_LOADING', array_merge($ctxBase(), [
+        jsonResult(update_shipment_status($id, 'READY_FOR_LOADING', array_merge(ctxBase(), [
             'tenant_id' => $tenant_id, 'branch_id' => $assigned_branch_id,
             'event_type' => 'READY_FOR_LOADING', 'notes' => 'Marked ready for loading by warehouse.',
         ])));
@@ -154,13 +170,13 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['ajax_action'])) {
     if ($action === 'load_container') {
         if (!$caps['load']) access_denied_redirect();
         $id = postInt('id'); $container_id = postInt('container_id'); $qty = max(1, postInt('quantity', 1));
-        $ct = $pdo->prepare("SELECT current_branch_id, container_number FROM containers WHERE id = ? AND tenant_id = ?");
+        $ct = $pdo->prepare("SELECT current_branch_id, container_number, status FROM containers WHERE id = ? AND tenant_id = ?");
         $ct->execute([$container_id, $tenant_id]);
         $c = $ct->fetch(PDO::FETCH_ASSOC);
         if (!$c || (int)$c['current_branch_id'] !== $assigned_branch_id) {
             jsonOut(['success' => false, 'message' => 'Container not available at your branch.']);
         }
-        jsonOut(load_shipment_into_container($id, $container_id, $qty, array_merge($ctxBase(), ['tenant_id' => $tenant_id])));
+        jsonResult(load_shipment_into_container($id, $container_id, $qty, array_merge(ctxBase(), ['tenant_id' => $tenant_id])));
     }
 
     // ---- Branch pickup release with proof of collection (Maxamed collects) --
@@ -192,7 +208,30 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['ajax_action'])) {
             jsonOut(['success' => false, 'message' => 'A valid OTP code is required.']);
         }
 
-        // Close out warehouse stock (no longer physically available)
+        // Close out warehouse stock (no longer physically available) and keep
+        // a cargo movement audit trail. This is shipment cargo leaving the
+        // warehouse, not retail inventory becoming low/out of stock.
+        $activeStockStmt = $pdo->prepare("SELECT id, quantity, zone, bin_location FROM warehouse_stock WHERE shipment_id = ? AND tenant_id = ? AND is_active = 1 ORDER BY id DESC LIMIT 1");
+        $activeStockStmt->execute([$id, $tenant_id]);
+        $activeStock = $activeStockStmt->fetch(PDO::FETCH_ASSOC);
+        if ($activeStock && (int)$activeStock['quantity'] > 0) {
+            record_stock_movement([
+                'tenant_id' => $tenant_id,
+                'warehouse_stock_id' => (int)$activeStock['id'],
+                'quantity_change' => -(int)$activeStock['quantity'],
+                'previous_quantity' => (int)$activeStock['quantity'],
+                'new_quantity' => 0,
+                'movement_type' => 'out',
+                'movement_event' => 'released_pickup',
+                'from_location' => trim(((string)($branches_map[$assigned_branch_id] ?? '')) . ' Warehouse · ' . (($activeStock['zone'] ?? '') ?: '-') . ' / ' . (($activeStock['bin_location'] ?? '') ?: '-')),
+                'to_location' => $receiver_name,
+                'reference_type' => 'shipment',
+                'reference_id' => $id,
+                'reference_label' => $s['shipment_number'] ?? null,
+                'notes' => "RELEASE: Warehouse to receiver {$receiver_name}",
+                'created_by' => $_SESSION['user_id'] ?? null,
+            ]);
+        }
         $pdo->prepare("UPDATE warehouse_stock SET is_active = 0, quantity = 0,
                         mogadishu_status = 'delivered',
                         notes = CONCAT(COALESCE(notes,''), ' [released to receiver]')
@@ -213,12 +252,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['ajax_action'])) {
             $relQty, $_SESSION['user_id'] ?? null, $_SESSION['user_name'] ?? null,
             $assigned_branch_id, postStr('notes') ?: null]);
 
-        $res = update_shipment_status($id, 'DELIVERED', array_merge($ctxBase(), [
+        $res = update_shipment_status($id, 'DELIVERED', array_merge(ctxBase(), [
             'tenant_id' => $tenant_id, 'branch_id' => $assigned_branch_id,
             'event_type' => 'PICKUP_RELEASED',
             'notes' => "Collected by {$receiver_name}. Verification: {$method}. Quantity released: {$relQty}.",
         ]));
-        jsonOut($res);
+        jsonResult($res);
     }
 
     // ---- Report damage / hold ---------------------------------------------
@@ -226,7 +265,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['ajax_action'])) {
         if (!$caps['report_problem']) access_denied_redirect();
         $id = postInt('id'); $kind = postStr('kind', 'ON_HOLD'); $note = postStr('notes');
         if (!in_array($kind, ['ON_HOLD', 'DAMAGED'], true)) jsonOut(['success' => false, 'message' => 'Invalid report type.']);
-        jsonOut(update_shipment_status($id, $kind, array_merge($ctxBase(), [
+        jsonResult(update_shipment_status($id, $kind, array_merge(ctxBase(), [
             'tenant_id' => $tenant_id, 'branch_id' => $assigned_branch_id, 'force' => true,
             'event_type' => 'REPORTED_' . $kind, 'notes' => $note ?: null,
         ])));
@@ -236,12 +275,26 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['ajax_action'])) {
     if ($action === 'close_shipment') {
         if (!$caps['close']) access_denied_redirect();
         $id = postInt('id');
-        $st = $pdo->prepare("SELECT current_status FROM shipments WHERE id = ? AND tenant_id = ?");
+        $st = $pdo->prepare("SELECT current_status, current_trip_id, customer_id FROM shipments WHERE id = ? AND tenant_id = ?");
         $st->execute([$id, $tenant_id]);
-        if ((string)$st->fetchColumn() !== 'DELIVERED') {
+        $shipToClose = $st->fetch(PDO::FETCH_ASSOC);
+        if (!$shipToClose || (string)$shipToClose['current_status'] !== 'DELIVERED') {
             jsonOut(['success' => false, 'message' => 'Only DELIVERED shipments can be closed.']);
         }
-        jsonOut(update_shipment_status($id, 'CLOSED', array_merge($ctxBase(), [
+        // Payment timing remains flexible (origin, dispatch, destination, or
+        // credit). At closure, however, any active invoice that actually
+        // covers this shipment's trip/customer must be settled or cancelled.
+        if (!empty($shipToClose['current_trip_id']) && !empty($shipToClose['customer_id'])) {
+            $due = $pdo->prepare("SELECT COUNT(*) FROM invoices
+                                  WHERE tenant_id = ? AND trip_id = ? AND customer_id = ?
+                                    AND COALESCE(is_active,1) = 1 AND status <> 'cancelled'
+                                    AND (status <> 'paid' OR COALESCE(paid_amount,0) + 0.005 < total_amount)");
+            $due->execute([$tenant_id, $shipToClose['current_trip_id'], $shipToClose['customer_id']]);
+            if ((int)$due->fetchColumn() > 0) {
+                jsonOut(['success' => false, 'message' => 'Outstanding trip invoice must be settled before closing this shipment.']);
+            }
+        }
+        jsonResult(update_shipment_status($id, 'CLOSED', array_merge(ctxBase(), [
             'tenant_id' => $tenant_id, 'branch_id' => $assigned_branch_id,
             'event_type' => 'CLOSED', 'notes' => 'Lifecycle closed after delivery and finance completion.',
         ])));
@@ -260,7 +313,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['ajax_action'])) {
         if ($s['current_status'] !== 'IN_DESTINATION_WAREHOUSE') {
             jsonOut(['success' => false, 'message' => "Shipment is {$s['current_status']}; receive it into the destination warehouse first."]);
         }
-        jsonOut(update_shipment_status($id, 'READY_FOR_PICKUP', array_merge($ctxBase(), [
+        jsonResult(update_shipment_status($id, 'READY_FOR_PICKUP', array_merge(ctxBase(), [
             'tenant_id' => $tenant_id, 'branch_id' => $assigned_branch_id,
             'event_type' => 'READY_FOR_PICKUP', 'notes' => 'Marked ready for customer pickup.',
         ])));
@@ -268,7 +321,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['ajax_action'])) {
 
     // ---- Assign last-mile delivery to a courier (DEL-xxxx) -----------------
     if ($action === 'assign_delivery') {
-        if (!in_array($current_role_type, ['warehouse_supervisor', 'logistics_supervisor', 'clerk'], true)) access_denied_redirect();
+        if (!$caps['assign_delivery']) access_denied_redirect();
         $id = postInt('id');
         $agent_id = postInt('agent_id');
         $address = postStr('delivery_address');
@@ -308,6 +361,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['ajax_action'])) {
 
     // ---- Active couriers of this tenant -------------------------------------
     if ($action === 'get_agents') {
+        if (!$caps['assign_delivery']) access_denied_redirect();
         $st = $pdo->prepare("SELECT id, full_name FROM users WHERE tenant_id = ? AND is_active = 1 AND role_type = 'delivery_agent' ORDER BY full_name");
         $st->execute([$tenant_id]);
         jsonOut(['success' => true, 'agents' => $st->fetchAll(PDO::FETCH_ASSOC)]);
@@ -315,7 +369,21 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['ajax_action'])) {
 
     // ---- Container options for the loading modal ---------------------------
     if ($action === 'get_branch_containers') {
-        $st = $pdo->prepare("SELECT id, container_number, status, size_cbm FROM containers WHERE tenant_id = ? AND current_branch_id = ? AND is_active = 1 ORDER BY created_at DESC");
+        $st = $pdo->prepare("
+            SELECT c.id, c.container_number, c.status, c.size_cbm,
+                   COALESCE(SUM(cmi.cbm_used),0) AS used_cbm,
+                   COALESCE(SUM(cmi.quantity),0) AS total_quantity
+            FROM containers c
+            LEFT JOIN cargo_manifest_items cmi ON cmi.container_id = c.id AND cmi.tenant_id = c.tenant_id
+            WHERE c.tenant_id = ? AND c.current_branch_id = ? AND c.is_active = 1
+              AND c.status IN ('received','loading','loaded')
+              AND NOT EXISTS (
+                  SELECT 1 FROM trucking_trips t
+                  WHERE t.container_id = c.id AND t.tenant_id = c.tenant_id
+                    AND t.status IN ('delivered','completed')
+              )
+            GROUP BY c.id
+            ORDER BY c.created_at DESC");
         $st->execute([$tenant_id, $assigned_branch_id]);
         jsonOut(['success' => true, 'containers' => $st->fetchAll(PDO::FETCH_ASSOC)]);
     }
@@ -397,8 +465,9 @@ unset($_SESSION['flash_message'], $_SESSION['flash_type']);
       <div class="modal-header"><h5 class="modal-title">Receive into Warehouse</h5>
         <button type="button" class="close" data-dismiss="modal">&times;</button></div>
       <div class="modal-body">
-        <div class="form-group"><label>Zone</label><input name="zone" class="form-control" placeholder="e.g. B" required></div>
-        <div class="form-group"><label>Rack</label><input name="rack" class="form-control" placeholder="e.g. B-05" required></div>
+        <div class="form-group"><label>Zone</label><input name="zone" class="form-control" placeholder="e.g. B, Back, Left Side" required></div>
+        <div class="form-group"><label>Storage Location</label><input name="storage_location" class="form-control" placeholder="e.g. B-05, Corner 1, Near Table 2" required>
+          <small class="text-muted">Internal physical location inside this warehouse.</small></div>
       </div>
       <div class="modal-footer">
         <button type="button" class="btn btn-secondary" data-dismiss="modal">Cancel</button>
@@ -418,9 +487,11 @@ unset($_SESSION['flash_message'], $_SESSION['flash_type']);
         <button type="button" class="close" data-dismiss="modal">&times;</button></div>
       <div class="modal-body">
         <div class="form-group"><label>Container (at your branch)</label><select name="container_id" id="loadContainer" class="form-control" required></select></div>
+        <small id="noContainerHint" class="form-text text-muted" style="display:none;">No eligible loading container is available. Create a new container first, then return here to load this shipment.</small>
         <div class="form-group"><label>Quantity to load</label><input type="number" min="1" name="quantity" id="loadQty" class="form-control" required></div>
       </div>
       <div class="modal-footer">
+        <a class="btn btn-outline-primary mr-auto" href="containers.php"><i class="fas fa-plus-circle"></i> Create Container</a>
         <button type="button" class="btn btn-secondary" data-dismiss="modal">Cancel</button>
         <button class="btn btn-primary">Add to Manifest</button>
       </div>
@@ -478,6 +549,9 @@ unset($_SESSION['flash_message'], $_SESSION['flash_type']);
   </div>
 </div>
 
+<script src="https://code.jquery.com/jquery-3.5.1.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/popper.js@1.16.1/dist/umd/popper.min.js"></script>
+<script src="https://stackpath.bootstrapcdn.com/bootstrap/4.5.2/js/bootstrap.min.js"></script>
 <script>
 const statusLabels = <?= json_encode($status_labels) ?>;
 let currentPage = 1;
@@ -494,10 +568,11 @@ function loadShipments(page = 1) {
         if (!res.success) { toast(res.message, false); return; }
         let html = '';
         res.rows.forEach(r => {
+            const storage = [r.active_zone, r.active_storage_location].filter(Boolean).join(' / ');
             html += `<tr>
                 <td><strong>${esc(r.shipment_number)}</strong></td>
                 <td>${esc(r.tracking_number || '')}</td>
-                <td>${esc(r.cargo_description || '')}</td>
+                <td>${esc(r.cargo_description || '')}${storage ? `<br><small class="text-muted">${esc(storage)}</small>` : ''}</td>
                 <td>${r.quantity}</td>
                 <td>${esc(r.origin_name || '')} → ${esc(r.destination_name || '')}</td>
                 <td><span class="badge badge-secondary">${esc(statusLabels[r.current_status] || r.current_status)}</span></td>
@@ -506,10 +581,10 @@ function loadShipments(page = 1) {
                 <td class="text-nowrap">
                     <button class="btn btn-sm btn-outline-primary view-shipment" data-id="${r.id}"><i class="fas fa-eye"></i></button>
                     <?php if ($caps['receive']): ?>
-                      ${['RECEIVED','REGISTERED'].includes(r.current_status) ? `<button class="btn btn-sm btn-outline-success receive-btn" data-id="${r.id}"><i class="fas fa-warehouse"></i></button>` : ''}
+                      ${['RECEIVED','REGISTERED'].includes(r.current_status) ? `<button class="btn btn-sm btn-outline-success receive-btn" data-id="${r.id}"><i class="fas fa-warehouse"></i> Receive Into Warehouse</button>` : ''}
                     <?php endif; ?>
                     <?php if ($caps['mark_ready']): ?>
-                      ${r.current_status === 'IN_ORIGIN_WAREHOUSE' ? `<button class="btn btn-sm btn-outline-warning ready-btn" data-id="${r.id}">Ready</button>` : ''}
+                      ${r.current_status === 'IN_ORIGIN_WAREHOUSE' ? `<button class="btn btn-sm btn-outline-warning ready-btn" data-id="${r.id}">Mark Ready for Loading</button>` : ''}
                     <?php endif; ?>
                     <?php if ($caps['load']): ?>
                       ${['IN_ORIGIN_WAREHOUSE','READY_FOR_LOADING'].includes(r.current_status) ? `<button class="btn btn-sm btn-outline-info load-btn" data-id="${r.id}"><i class="fas fa-truck-loading"></i></button>` : ''}
@@ -576,6 +651,66 @@ function renderDetail(d) {
       <ul class="list-group" style="max-height:300px;overflow:auto;">${evHtml}</ul>`);
 }
 
+function renderDetailV2(d) {
+    const s = d.shipment;
+    const eventLabels = {
+        REPAIR_INVALID_COMPLETED_CONTAINER_LINK: 'Repair Invalid Completed Container Link',
+        LOADED_INTO_CONTAINER: 'Loaded into Container',
+        ASSIGNED_TO_TRIP: 'Assigned to Trip',
+        DISPATCH_APPROVED: 'Dispatch Approved',
+        TRIP_IN_TRANSIT: 'Trip In Transit',
+        WAREHOUSE_RECEIVED: 'Warehouse Received',
+        READY_FOR_LOADING: 'Ready for Loading',
+        STATUS_READY_FOR_LOADING: 'Ready for Loading',
+        RECEIVED_AT_DESTINATION_WAREHOUSE: 'Received at Destination Warehouse',
+        ARRIVED_AT_DESTINATION: 'Arrived at Destination',
+        PICKUP_RELEASED: 'Pickup Released',
+        DELIVERY_ASSIGNED: 'Delivery Assigned'
+    };
+    const prettyEvent = code => eventLabels[code] || String(code || '').replaceAll('_', ' ').toLowerCase().replace(/\b\w/g, c => c.toUpperCase());
+    const qtyUnit = s.quantity_unit || 'Cartons';
+    const cbm = parseFloat(s.volume_cbm || 0);
+    const cbmText = cbm > 0 ? cbm.toFixed(2) + ' CBM' : 'Not provided';
+    const storageParts = [s.current_stock_zone || s.storage_zone, s.current_stock_location || s.storage_rack].filter(Boolean);
+    const storageText = storageParts.length ? storageParts.join(' / ') : '-';
+    const statusText = statusLabels[s.current_status] || s.current_status;
+    const events = (d.events || []).map(e => `<li class="list-group-item py-1">
+        <small class="text-muted">${esc(e.created_at)}</small> -
+        <strong>${esc(prettyEvent(e.event_type))}</strong>
+        ${e.new_status ? '(' + esc(statusLabels[e.new_status] || e.new_status) + ')' : ''}
+        ${e.location_label ? '@ ' + esc(e.location_label) : ''}
+        ${e.performer_name ? ' by ' + esc(e.performer_name) : ''}
+        ${e.notes ? '<br><small>' + esc(e.notes) + '</small>' : ''}
+    </li>`).join('');
+    const releases = (d.releases || []).map(r => `<li class="list-group-item py-1">
+        <small>${esc(r.released_at)}</small> - ${esc(r.release_type)} to
+        <strong>${esc(r.receiver_name)}</strong>, verified via ${esc(r.verification_method)},
+        qty ${r.quantity_released}, by ${esc(r.released_by_name || '')}
+    </li>`).join('');
+    $('#detailBody').html(`
+      <div class="row">
+        <div class="col-md-6 mb-2"><strong>Shipment</strong><br>${esc(s.shipment_number)}</div>
+        <div class="col-md-6 mb-2"><strong>Tracking</strong><br>${esc(s.tracking_number || '-')}</div>
+        <div class="col-md-6 mb-2"><strong>Customer</strong><br>${esc(s.customer_name || '-')}</div>
+        <div class="col-md-6 mb-2"><strong>Receiver</strong><br>${esc(s.receiver_name || '-')} ${s.receiver_phone ? '&middot; ' + esc(s.receiver_phone) : ''}</div>
+        <div class="col-md-6 mb-2"><strong>Cargo</strong><br>${esc(s.cargo_description || '-')}</div>
+        <div class="col-md-6 mb-2"><strong>Quantity</strong><br>${esc(s.quantity)} ${esc(qtyUnit)}</div>
+        <div class="col-md-6 mb-2"><strong>Weight</strong><br>${Number(s.weight_kg || 0).toFixed(2)} KG</div>
+        <div class="col-md-6 mb-2"><strong>CBM</strong><br>${esc(cbmText)}</div>
+        <div class="col-md-6 mb-2"><strong>Route</strong><br>${esc(s.origin_name || '-')} &rarr; ${esc(s.destination_name || '-')}</div>
+        <div class="col-md-6 mb-2"><strong>Current Status</strong><br>${esc(statusText)}</div>
+        <div class="col-md-6 mb-2"><strong>Origin Warehouse</strong><br>${esc(s.origin_name || '-')} Warehouse</div>
+        <div class="col-md-6 mb-2"><strong>Origin Storage Location</strong><br>${esc(storageText)}</div>
+        <div class="col-md-6 mb-2"><strong>Container</strong><br>${esc(s.container_number || '-')} ${s.container_status ? '(' + esc(s.container_status) + ')' : ''}</div>
+        <div class="col-md-6 mb-2"><strong>Trip</strong><br>${esc(s.trip_number || '-')} ${s.trip_status ? '(' + esc(s.trip_status) + ')' : ''}</div>
+        <div class="col-md-6 mb-2"><strong>Driver</strong><br>${esc(s.driver_name || '-')} ${s.driver_phone ? '&middot; ' + esc(s.driver_phone) : ''}</div>
+        <div class="col-md-6 mb-2"><strong>Truck</strong><br>${esc(s.truck_plate || '-')}</div>
+      </div>
+      ${releases ? '<h6>Proof of Collection / Delivery</h6><ul class="list-group mb-2">' + releases + '</ul>' : ''}
+      <h6>Lifecycle History</h6>
+      <ul class="list-group" style="max-height:300px;overflow:auto;">${events}</ul>`);
+}
+
 $(function() {
     loadShipments();
     let timer = null;
@@ -586,7 +721,7 @@ $(function() {
     $(document).on('click', '.view-shipment', function(){
         $.post('', { ajax_action:'get_shipment', id: $(this).data('id') }, function(res){
             if (!res.success) { toast(res.message, false); return; }
-            renderDetail(res);
+            renderDetailV2(res);
             $('#detailModal').modal('show');
         }, 'json');
     });
@@ -614,8 +749,10 @@ $(function() {
             let opts = '<option value="">Select container...</option>';
             res.containers.forEach(c => { opts += `<option value="${c.id}">${esc(c.container_number)} (${esc(c.status)})</option>`; });
             $('#loadContainer').html(opts);
+            $('#noContainerHint').toggle((res.containers || []).length === 0);
             $('#loadModal').modal('show');
         }, 'json');
+    });
     $(document).on('click', '.pickupready-btn', function(){
         $.post('', { ajax_action:'mark_ready_pickup', id: $(this).data('id') }, function(res){
             toast(res.message, !!res.success); if (res.success) loadShipments(currentPage);
