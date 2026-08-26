@@ -79,16 +79,20 @@ try {
 // ==============================================
 // DASHBOARD STATISTICS
 // ==============================================
+// Tenant scope for every KPI query below — never trust POST/GET for this.
+$tenant_id = (int)($_SESSION['tenant_id'] ?? 0);
 
-// 1. Today's Reception Count
+// 1. Today's Receptions — new shipments intake at my origin branch today.
+// Authoritative source is `shipments` (not legacy `packages`). Scoped by
+// tenant + origin_branch_id: this counts intake owned by MY branch.
 $today_receptions = 0;
 try {
     $stmt = $pdo->prepare("
-        SELECT COUNT(*) as count FROM packages 
-        WHERE current_branch_id = ? 
-        AND DATE(created_at) = CURDATE()
+        SELECT COUNT(*) as count FROM shipments
+        WHERE tenant_id = ? AND origin_branch_id = ?
+          AND DATE(created_at) = CURDATE()
     ");
-    $stmt->execute([$assigned_branch_id]);
+    $stmt->execute([$tenant_id, $assigned_branch_id]);
     $today_receptions = $stmt->fetch(PDO::FETCH_ASSOC)['count'] ?? 0;
 } catch (PDOException $e) {}
 
@@ -110,28 +114,35 @@ try {
     $total_stock_volume = $stockData['total_volume'] ?? 0;
 } catch (PDOException $e) {}
 
-// 3. Pending Deliveries
+// 3. Pending Deliveries — shipments due to reach a customer AT MY branch
+// but not yet released. Includes every in-flight/on-hold state between
+// dispatch and physical customer collection at MY destination.
 $pending_deliveries = 0;
 try {
     $stmt = $pdo->prepare("
-        SELECT COUNT(*) as count FROM packages 
-        WHERE current_branch_id = ? 
-        AND status IN ('warehouse', 'out_for_delivery', 'pending')
+        SELECT COUNT(*) as count FROM shipments
+        WHERE tenant_id = ? AND destination_branch_id = ?
+          AND current_status IN ('IN_TRANSIT','ARRIVED_AT_DESTINATION','IN_DESTINATION_WAREHOUSE','READY_FOR_PICKUP','OUT_FOR_DELIVERY')
     ");
-    $stmt->execute([$assigned_branch_id]);
+    $stmt->execute([$tenant_id, $assigned_branch_id]);
     $pending_deliveries = $stmt->fetch(PDO::FETCH_ASSOC)['count'] ?? 0;
 } catch (PDOException $e) {}
 
-// 4. Today's Deliveries
+// 4. Today's Deliveries — shipments physically collected/completed AT MY
+// branch today. Semantic rule: destination_branch_id, current_status
+// DELIVERED, delivered_at today. This lens matches the branch-manager
+// mental model of "our customers who got their goods today". A shipment
+// sent from MY branch to another branch is not "my delivery" here — the
+// destination branch manager owns that KPI.
 $today_deliveries = 0;
 try {
     $stmt = $pdo->prepare("
-        SELECT COUNT(*) as count FROM packages 
-        WHERE current_branch_id = ? 
-        AND status = 'delivered'
-        AND DATE(delivered_date) = CURDATE()
+        SELECT COUNT(*) as count FROM shipments
+        WHERE tenant_id = ? AND destination_branch_id = ?
+          AND current_status = 'DELIVERED'
+          AND DATE(delivered_at) = CURDATE()
     ");
-    $stmt->execute([$assigned_branch_id]);
+    $stmt->execute([$tenant_id, $assigned_branch_id]);
     $today_deliveries = $stmt->fetch(PDO::FETCH_ASSOC)['count'] ?? 0;
 } catch (PDOException $e) {}
 
@@ -188,16 +199,17 @@ try {
     $month_revenue = $stmt->fetch(PDO::FETCH_ASSOC)['total'] ?? 0;
 } catch (PDOException $e) {}
 
-// 9. Total Customers for this branch
+// 9. Total Customers who have transacted with MY branch (origin or destination).
 $total_customers = 0;
 try {
     $stmt = $pdo->prepare("
-        SELECT COUNT(DISTINCT c.id) as count 
+        SELECT COUNT(DISTINCT c.id) as count
         FROM customers c
-        JOIN packages p ON p.customer_id = c.id
-        WHERE p.current_branch_id = ?
+        JOIN shipments s ON s.customer_id = c.id
+        WHERE s.tenant_id = ?
+          AND (s.origin_branch_id = ? OR s.destination_branch_id = ?)
     ");
-    $stmt->execute([$assigned_branch_id]);
+    $stmt->execute([$tenant_id, $assigned_branch_id, $assigned_branch_id]);
     $total_customers = $stmt->fetch(PDO::FETCH_ASSOC)['count'] ?? 0;
 } catch (PDOException $e) {}
 
@@ -216,34 +228,40 @@ try {
 // RECENT ACTIVITIES
 // ==============================================
 
-// Recent Receptions
+// Recent Receptions — most recent intake at MY origin branch (authoritative shipments).
 $recent_receptions = [];
 try {
     $stmt = $pdo->prepare("
-        SELECT p.*, c.customer_name 
-        FROM packages p
-        LEFT JOIN customers c ON p.customer_id = c.id
-        WHERE p.current_branch_id = ?
-        ORDER BY p.created_at DESC
+        SELECT s.id, s.shipment_number AS package_number, s.tracking_number,
+               s.cargo_description AS package_type, s.current_status AS status,
+               s.created_at, s.receiver_name, s.sender_name,
+               c.customer_name
+        FROM shipments s
+        LEFT JOIN customers c ON s.customer_id = c.id
+        WHERE s.tenant_id = ? AND s.origin_branch_id = ?
+        ORDER BY s.created_at DESC
         LIMIT 10
     ");
-    $stmt->execute([$assigned_branch_id]);
+    $stmt->execute([$tenant_id, $assigned_branch_id]);
     $recent_receptions = $stmt->fetchAll(PDO::FETCH_ASSOC);
 } catch (PDOException $e) {}
 
-// Recent Deliveries
+// Recent Deliveries — most recent customer deliveries at MY destination branch.
 $recent_deliveries = [];
 try {
     $stmt = $pdo->prepare("
-        SELECT p.*, c.customer_name 
-        FROM packages p
-        LEFT JOIN customers c ON p.customer_id = c.id
-        WHERE p.current_branch_id = ? 
-        AND p.status = 'delivered'
-        ORDER BY p.delivered_date DESC
+        SELECT s.id, s.shipment_number AS package_number, s.tracking_number,
+               s.cargo_description AS package_type, s.current_status AS status,
+               s.delivered_at AS delivered_date, s.receiver_name, s.sender_name,
+               c.customer_name
+        FROM shipments s
+        LEFT JOIN customers c ON s.customer_id = c.id
+        WHERE s.tenant_id = ? AND s.destination_branch_id = ?
+          AND s.current_status = 'DELIVERED'
+        ORDER BY s.delivered_at DESC
         LIMIT 10
     ");
-    $stmt->execute([$assigned_branch_id]);
+    $stmt->execute([$tenant_id, $assigned_branch_id]);
     $recent_deliveries = $stmt->fetchAll(PDO::FETCH_ASSOC);
 } catch (PDOException $e) {}
 
@@ -289,18 +307,19 @@ try {
     $stock_by_origin = $stmt->fetchAll(PDO::FETCH_ASSOC);
 } catch (PDOException $e) {}
 
-// Recent Customers
+// Recent Customers — distinct customers who have transacted at my branch.
 $recent_customers = [];
 try {
     $stmt = $pdo->prepare("
         SELECT DISTINCT c.id, c.customer_name, c.phone, c.email, c.created_at
         FROM customers c
-        JOIN packages p ON p.customer_id = c.id
-        WHERE p.current_branch_id = ?
+        JOIN shipments s ON s.customer_id = c.id
+        WHERE s.tenant_id = ?
+          AND (s.origin_branch_id = ? OR s.destination_branch_id = ?)
         ORDER BY c.created_at DESC
         LIMIT 5
     ");
-    $stmt->execute([$assigned_branch_id]);
+    $stmt->execute([$tenant_id, $assigned_branch_id, $assigned_branch_id]);
     $recent_customers = $stmt->fetchAll(PDO::FETCH_ASSOC);
 } catch (PDOException $e) {}
 
@@ -314,20 +333,21 @@ for ($i = 6; $i >= 0; $i--) {
     $day_name = date('D', strtotime($date));
     
     try {
-        // Receptions
+        // Receptions — new intake at my origin.
         $stmt = $pdo->prepare("
-            SELECT COUNT(*) as count FROM packages 
-            WHERE current_branch_id = ? AND DATE(created_at) = ?
+            SELECT COUNT(*) as count FROM shipments
+            WHERE tenant_id = ? AND origin_branch_id = ? AND DATE(created_at) = ?
         ");
-        $stmt->execute([$assigned_branch_id, $date]);
+        $stmt->execute([$tenant_id, $assigned_branch_id, $date]);
         $weekly_receptions[$day_name] = $stmt->fetch(PDO::FETCH_ASSOC)['count'] ?? 0;
-        
-        // Deliveries
+
+        // Deliveries — customers physically collecting at my destination.
         $stmt = $pdo->prepare("
-            SELECT COUNT(*) as count FROM packages 
-            WHERE current_branch_id = ? AND status = 'delivered' AND DATE(delivered_date) = ?
+            SELECT COUNT(*) as count FROM shipments
+            WHERE tenant_id = ? AND destination_branch_id = ?
+              AND current_status = 'DELIVERED' AND DATE(delivered_at) = ?
         ");
-        $stmt->execute([$assigned_branch_id, $date]);
+        $stmt->execute([$tenant_id, $assigned_branch_id, $date]);
         $weekly_deliveries[$day_name] = $stmt->fetch(PDO::FETCH_ASSOC)['count'] ?? 0;
     } catch (PDOException $e) {
         $weekly_receptions[$day_name] = 0;
