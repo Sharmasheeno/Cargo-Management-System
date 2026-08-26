@@ -952,7 +952,7 @@ include_once __DIR__ . '/../includes/header.php';
             <div class="dashboard-card">
                 <div class="card-header">
                     <h3><i class="fas fa-truck"></i> Recent Deliveries</h3>
-                    <a href="packages.php?status=delivered" class="view-all-link">View All <i class="fas fa-arrow-right"></i></a>
+                    <a href="tracking.php?status=delivered" class="view-all-link">View All <i class="fas fa-arrow-right"></i></a>
                 </div>
                 <div class="card-body">
                     <div class="table-responsive">
@@ -1059,7 +1059,7 @@ include_once __DIR__ . '/../includes/header.php';
             <div class="dashboard-card">
                 <div class="card-header">
                     <h3><i class="fas fa-users"></i> Recent Customers</h3>
-                    <a href="customers.php" class="view-all-link">View All <i class="fas fa-arrow-right"></i></a>
+                    <a href="invoices.php" class="view-all-link">View All <i class="fas fa-arrow-right"></i></a>
                 </div>
                 <div class="card-body">
                     <div class="table-responsive">
@@ -1094,7 +1094,7 @@ include_once __DIR__ . '/../includes/header.php';
                 <div class="card-body">
                     <div class="quick-actions">
                         <a href="receptions.php" class="quick-action-btn"><i class="fas fa-clipboard-list"></i><span>New Reception</span><i class="fas fa-chevron-right"></i></a>
-                        <a href="packages.php" class="quick-action-btn"><i class="fas fa-box"></i><span>Manage Stock</span><i class="fas fa-chevron-right"></i></a>
+                        <a href="warehouse_stock.php" class="quick-action-btn"><i class="fas fa-box"></i><span>Manage Stock</span><i class="fas fa-chevron-right"></i></a>
                         <a href="trips.php" class="quick-action-btn"><i class="fas fa-truck"></i><span>Create Trip</span><i class="fas fa-chevron-right"></i></a>
                         <a href="branch_report.php" class="quick-action-btn"><i class="fas fa-chart-bar"></i><span>Generate Reports</span><i class="fas fa-chevron-right"></i></a>
                         <a href="branch_settings.php" class="quick-action-btn"><i class="fas fa-cog"></i><span>Branch Settings</span><i class="fas fa-chevron-right"></i></a>
