@@ -689,6 +689,14 @@ if (!function_exists('load_shipment_into_container')) {
         $ct->execute([$container_id, $tenantId]);
         $container = $ct->fetch(PDO::FETCH_ASSOC);
         if (!$container) return ['ok' => false, 'message' => 'Container not found.'];
+        // Physical-location guard: a shipment can only be loaded into a container
+        // that is at the same branch. Prevents a supervisor at branch A from
+        // loading cargo physically held at branch B into a local container.
+        $shipBranch = (int)($ship['current_branch_id'] ?? $ship['origin_branch_id'] ?? 0);
+        $contBranch = (int)($container['current_branch_id'] ?? $container['origin_branch_id'] ?? 0);
+        if ($shipBranch > 0 && $contBranch > 0 && $shipBranch !== $contBranch) {
+            return ['ok' => false, 'message' => 'Shipment is not physically at this container\'s branch and cannot be loaded here.'];
+        }
         if ((int)$quantity > (int)$ship['quantity']) {
             return ['ok' => false, 'message' => "Quantity {$quantity} exceeds available {$ship['quantity']}."];
         }

@@ -418,8 +418,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['ajax_action'])) {
 
         try {
             $pdo->beginTransaction();
-            $stmt = $pdo->prepare("SELECT status FROM trucking_trips WHERE id = ? AND tenant_id = ? AND (branch_id = ? OR from_branch_id = ? OR to_branch_id = ?) FOR UPDATE");
-            $stmt->execute([$id, $tenant_id, $assigned_branch_id, $assigned_branch_id, $assigned_branch_id]);
+            // Only the origin branch (or the trip's owning branch) may advance a trip's
+            // lifecycle status. The destination branch participates through its own
+            // warehouse receive/handover flows and must not mutate the trip record.
+            $stmt = $pdo->prepare("SELECT status FROM trucking_trips WHERE id = ? AND tenant_id = ? AND (branch_id = ? OR from_branch_id = ?) FOR UPDATE");
+            $stmt->execute([$id, $tenant_id, $assigned_branch_id, $assigned_branch_id]);
             $trip = $stmt->fetch(PDO::FETCH_ASSOC);
             if (!$trip) { $pdo->rollBack(); jsonOut(['success' => false, 'message' => 'Trip not found in your branch.']); }
 
