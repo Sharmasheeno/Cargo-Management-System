@@ -981,7 +981,8 @@ body.sidebar-collapsed .main-content {
       <!-- ==================== DRIVER / COURIER SIDEBAR ==================== -->
       <li><a href="../driver/index.php" class="<?= $currentPage == 'index.php' ? 'active' : '' ?>"><i class="fa-solid fa-house"></i><span>Dashboard</span></a></li>
       <?php if ($role === 'driver'): ?>
-        <li><a href="../driver/index.php"><i class="fa-solid fa-road"></i><span>My Trips</span></a></li>
+        <li><a href="../driver/my_trips.php" class="<?= $currentPage == 'my_trips.php' ? 'active' : '' ?>"><i class="fa-solid fa-road"></i><span>My Trips</span></a></li>
+        <li><a href="../driver/profile.php" class="<?= $currentPage == 'profile.php' ? 'active' : '' ?>"><i class="fa-solid fa-user"></i><span>Profile</span></a></li>
       <?php endif; ?>
       <?php if ($role === 'delivery_agent'): ?>
         <li><a href="../driver/deliveries.php" class="<?= $currentPage == 'deliveries.php' ? 'active' : '' ?>"><i class="fa-solid fa-motorcycle"></i><span>My Deliveries</span></a></li>
