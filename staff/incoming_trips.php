@@ -18,7 +18,7 @@ require_once __DIR__ . '/../includes/shipment_functions.php';
 require_login_guard();
 $tenant_id = require_tenant_context();
 $current_role_type = current_role_type();
-require_staff_subroles(['warehouse_supervisor', 'logistics_supervisor', 'clerk']);
+require_staff_subroles(['warehouse_supervisor']);
 ensureShipmentSchema($pdo);
 $assigned_branch_id = require_branch_context($pdo);
 
@@ -28,6 +28,13 @@ function postInt(string $k, int $def = 0): int { $v = $_POST[$k] ?? $def; return
 function postStr(string $k, string $def = ''): string { $v = $_POST[$k] ?? $def; return is_array($v) ? $def : trim((string)$v); }
 function ctxBase(): array {
     return ['performed_by' => $_SESSION['user_id'] ?? null, 'performer_name' => $_SESSION['user_name'] ?? null];
+}
+function qtyUnitFromRow(array $row): string {
+    $unit = trim((string)($row['quantity_unit'] ?? ''));
+    if ($unit === '' && !empty($row['package_notes']) && preg_match('/Quantity:\s*\d+\s+([A-Za-z]+)/i', (string)$row['package_notes'], $m)) {
+        $unit = $m[1];
+    }
+    return $unit !== '' ? ucwords(str_replace('_', ' ', $unit)) : 'Units';
 }
 
 $branch_name = '';
@@ -43,7 +50,7 @@ try {
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['ajax_action'])) {
     $action = postStr('ajax_action');
 
-    // Inbound trips to MY branch that have departed but not yet been receipted.
+    // Arrived inbound trips to MY branch that still have receivable manifest cargo.
     if ($action === 'list_incoming') {
         $st = $pdo->prepare("
             SELECT t.id, t.trip_number, t.status, t.departed_at, t.arrived_at,
@@ -59,7 +66,16 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['ajax_action'])) {
             LEFT JOIN containers c ON c.id = t.container_id
             LEFT JOIN branches ob ON ob.id = t.from_branch_id
             WHERE t.tenant_id = ? AND t.to_branch_id = ?
-              AND t.status IN ('in_transit','delivered','completed')
+              AND t.status IN ('delivered','completed')
+              AND EXISTS (
+                  SELECT 1
+                  FROM cargo_manifest_items cmi
+                  JOIN shipments s ON s.id = cmi.master_shipment_id AND s.tenant_id = cmi.tenant_id
+                  WHERE cmi.container_id = t.container_id
+                    AND cmi.tenant_id = t.tenant_id
+                    AND s.destination_branch_id = t.to_branch_id
+                    AND s.current_status IN ('ARRIVED_AT_DESTINATION','PARTIALLY_RECEIVED')
+              )
             ORDER BY FIELD(t.status,'in_transit','delivered','completed'), t.departed_at DESC");
         $st->execute([$tenant_id, $assigned_branch_id]);
         jsonOut(['success' => true, 'rows' => $st->fetchAll(PDO::FETCH_ASSOC)]);
@@ -75,26 +91,35 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['ajax_action'])) {
         $items = $pdo->prepare("
             SELECT cmi.id AS cmi_id, cmi.quantity AS expected_qty, cmi.weight_kg,
                    s.id AS shipment_id, s.shipment_number, s.tracking_number,
-                   s.cargo_description, s.receiver_name, s.current_status
+                   s.cargo_description, s.receiver_name, s.current_status,
+                   s.quantity_unit, p.notes AS package_notes
             FROM cargo_manifest_items cmi
             JOIN shipments s ON s.id = cmi.master_shipment_id
+            LEFT JOIN packages p ON p.id = s.source_package_id AND p.tenant_id = s.tenant_id
             WHERE cmi.tenant_id = ? AND cmi.container_id = ?
             ORDER BY s.shipment_number");
         $items->execute([$tenant_id, $trip['container_id']]);
-        jsonOut(['success' => true, 'trip' => $trip, 'items' => $items->fetchAll(PDO::FETCH_ASSOC)]);
+        $rows = $items->fetchAll(PDO::FETCH_ASSOC);
+        foreach ($rows as &$row) {
+            $row['quantity_unit_label'] = qtyUnitFromRow($row);
+            $row['expected_label'] = number_format((int)$row['expected_qty']) . ' ' . $row['quantity_unit_label'];
+        }
+        unset($row);
+        jsonOut(['success' => true, 'trip' => $trip, 'items' => $rows]);
     }
 
     // Receive ONE shipment off the inbound container with discrepancy handling.
     if ($action === 'receive_shipment') {
-        if (!in_array($current_role_type, ['warehouse_supervisor', 'clerk'], true)) access_denied_redirect();
+        if (!in_array($current_role_type, ['warehouse_supervisor'], true)) access_denied_redirect();
         $trip_id = postInt('trip_id');
         $shipment_id = postInt('shipment_id');
         $received_qty = postInt('received_qty', 0);
-        $zone = postStr('zone'); $rack = postStr('rack');
-        $discrepancy = postStr('discrepancy', 'none'); // none|shortage|excess|damage
-        $note = postStr('notes');
+        $zone = postStr('zone'); $storage_location = postStr('storage_location');
+        $discrepancy = postStr('discrepancy', 'none'); // none|shortage|missing|partial|excess|damage
+        $condition = postStr('condition', 'good');
+        $note = trim('Condition: ' . $condition . '. ' . postStr('notes'));
 
-        $t = $pdo->prepare("SELECT * FROM trucking_trips WHERE id = ? AND tenant_id = ? AND to_branch_id = ? FOR UPDATE");
+        $t = $pdo->prepare("SELECT t.*, c.container_number FROM trucking_trips t LEFT JOIN containers c ON c.id = t.container_id WHERE t.id = ? AND t.tenant_id = ? AND t.to_branch_id = ? FOR UPDATE");
         $t->execute([$trip_id, $tenant_id, $assigned_branch_id]);
         $trip = $t->fetch(PDO::FETCH_ASSOC);
         if (!$trip) jsonOut(['success' => false, 'message' => 'Trip not found for your branch.']);
@@ -115,11 +140,17 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['ajax_action'])) {
         $cmi->execute([$shipment_id, $trip['container_id']]);
         $expected = (int)$cmi->fetchColumn();
         if ($expected <= 0) jsonOut(['success' => false, 'message' => 'Shipment is not on this trip manifest.']);
-        if ($discrepancy === 'none' && $received_qty !== $expected) {
-            jsonOut(['success' => false, 'message' => "Expected {$expected}. Record a discrepancy (shortage/excess/damage) or receive the full quantity."]);
+        $validDiscrepancies = ['none', 'shortage', 'missing', 'partial', 'excess', 'damage'];
+        if (!in_array($discrepancy, $validDiscrepancies, true)) {
+            jsonOut(['success' => false, 'message' => 'Invalid discrepancy type.']);
         }
-        receive_shipment_action($pdo, $tenant_id, $assigned_branch_id, $branch_name,
-            $trip, $ship, $expected, $received_qty, $discrepancy, $note);
+        if ($discrepancy === 'none' && $received_qty !== $expected) {
+            jsonOut(['success' => false, 'message' => "Expected {$expected}. Record a discrepancy (shortage, missing, partial, excess, or damaged) or receive the full quantity."]);
+        }
+        // The handler is declared below within this request block. Defer the
+        // invocation until PHP has executed that declaration; calling it here
+        // caused a fatal "undefined function" at destination receiving.
+        $deferred_receive = [$trip, $ship, $expected, $received_qty, $discrepancy, $note];
     }
 
     function receive_shipment_action(PDO $pdo, int $tenant_id, int $branchId, string $branchName,
@@ -129,27 +160,18 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['ajax_action'])) {
         $pdo->beginTransaction();
         try {
             // Physical stock transfer: store into DESTINATION warehouse
-            $res = receive_shipment_into_warehouse($shipment_id, $branchId, postStr('zone'), postStr('rack'), array_merge(ctxBase(), [
+            $res = receive_shipment_into_warehouse($shipment_id, $branchId, postStr('zone'), postStr('storage_location'), array_merge(ctxBase(), [
                 'tenant_id' => $tenant_id,
                 'branch_name' => $branchName,
                 'is_destination' => true,
                 'trip_id' => $trip_id,
+                'from_location' => !empty($trip['container_number']) ? $trip['container_number'] : ('Container #' . $trip['container_id']),
+                'reference_label' => $trip['trip_number'],
                 'notes' => "Received from trip {$trip['trip_number']}. Expected {$expected}, received {$receivedQty}."
                     . ($discrepancy !== 'none' ? " Discrepancy: {$discrepancy}." : '')
                     . ($note ? " Note: {$note}" : ''),
             ]));
             if (!$res['ok']) throw new RuntimeException($res['message']);
-
-            // UNLOAD movement reference on the destination stock row
-            record_stock_movement([
-                'tenant_id' => $tenant_id, 'warehouse_stock_id' => (int)$res['warehouse_stock_id'],
-                'quantity_change' => $receivedQty,
-                'previous_quantity' => 0, 'new_quantity' => $receivedQty,
-                'movement_type' => 'move',
-                'reference_type' => 'trip_unload', 'reference_id' => $trip_id,
-                'notes' => "UNLOAD: Trip {$trip['trip_number']} / Container → {$branchName} Warehouse",
-                'created_by' => $_SESSION['user_id'] ?? null,
-            ]);
 
             // Manifest line taken off the container
             $pdo->prepare("UPDATE cargo_manifest_items SET mogadishu_status = 'delivered', mogadishu_taken_date = NOW()
@@ -164,11 +186,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['ajax_action'])) {
                     'event_type' => 'DISCREPANCY_DAMAGE',
                     'notes' => "Damaged in transit. Expected {$expected}, usable {$receivedQty}. {$note}",
                 ]));
-            } elseif ($discrepancy === 'shortage' && $receivedQty < $expected) {
+            } elseif (in_array($discrepancy, ['shortage', 'missing', 'partial'], true) && $receivedQty < $expected) {
                 update_shipment_status($shipment_id, 'PARTIALLY_RECEIVED', array_merge(ctxBase(), [
                     'tenant_id' => $tenant_id, 'force' => true, 'trip_id' => $trip_id,
                     'event_type' => 'DISCREPANCY_SHORTAGE',
-                    'notes' => "Shortage: expected {$expected}, received {$receivedQty}. {$note}",
+                    'notes' => ucfirst($discrepancy) . ": expected {$expected}, received {$receivedQty}. {$note}",
                 ]));
             } elseif ($receivedQty > $expected) {
                 log_shipment_event(array_merge(ctxBase(), [
@@ -205,6 +227,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['ajax_action'])) {
         }
     }
 
+    if (isset($deferred_receive)) {
+        [$trip, $ship, $expected, $received_qty, $discrepancy, $note] = $deferred_receive;
+        receive_shipment_action($pdo, $tenant_id, $assigned_branch_id, $branch_name,
+            $trip, $ship, $expected, $received_qty, $discrepancy, $note);
+    }
+
     jsonOut(['success' => false, 'message' => 'Unknown action.']);
 }
 
@@ -231,8 +259,11 @@ require_once __DIR__ . '/../includes/header.php';
             <div class="table-responsive">
                 <table class="table table-hover table-sm" id="incomingTable">
                     <thead class="bg-light">
-                        <tr><th>Trip</th><th>From</th><th>Truck</th><th>Driver</th>
-                            <th>Container</th><th>Status</th><th>Manifest Progress</th><th></th></tr>
+                        <tr>
+                            <th>Trip #</th><th>Origin</th><th>Arrival / Status</th><th>Truck</th><th>Driver</th>
+                            <th>Container</th><th>Expected Shipments</th><th>Expected Quantity</th>
+                            <th>Manifest Progress</th><th>Action</th>
+                        </tr>
                     </thead>
                     <tbody></tbody>
                 </table>
@@ -252,7 +283,13 @@ require_once __DIR__ . '/../includes/header.php';
   </div>
 </div>
 
+<?php require_once __DIR__ . '/../includes/footer.php'; ?>
+
 <script>
+// jQuery is loaded by includes/footer.php (above). This inline block MUST
+// come after that include or $(function(){...}) throws a ReferenceError at
+// parse time and silently aborts the initial trip fetch, leaving the
+// Incoming Trips table permanently empty even when the DB has arrived rows.
 function esc(s){ const d = document.createElement('div'); d.textContent = s ?? ''; return d.innerHTML; }
 function toast(m, ok=true){ alert((ok?'':'ERROR: ')+m); }
 const doneStatuses = ['IN_DESTINATION_WAREHOUSE','READY_FOR_PICKUP','OUT_FOR_DELIVERY','DELIVERED','CLOSED','PARTIALLY_RECEIVED','DAMAGED'];
@@ -263,12 +300,15 @@ function loadIncoming(){
         let html='';
         res.rows.forEach(t=>{
             const pct = t.shipment_count>0 ? Math.round(100*t.received_count/t.shipment_count) : 0;
+            const arrived = t.arrived_at ? esc(t.arrived_at) : 'Awaiting arrival timestamp';
             html += `<tr>
                 <td><strong>${esc(t.trip_number)}</strong></td>
                 <td>${esc(t.origin_name||'')}</td>
+                <td>${arrived}<br><span class="badge badge-info">${esc(t.status)}</span></td>
                 <td>${esc(t.truck_plate||'')}</td><td>${esc(t.driver_name||'')}</td>
                 <td>${esc(t.container_number||'')}</td>
-                <td><span class="badge badge-info">${esc(t.status)}</span></td>
+                <td class="text-center">${esc(t.shipment_count)}</td>
+                <td class="text-center">${esc(t.expected_total)}</td>
                 <td style="min-width:140px">
                   <div class="progress" style="height:16px">
                     <div class="progress-bar bg-success" style="width:${pct}%">${t.received_count}/${t.shipment_count}</div>
@@ -277,7 +317,7 @@ function loadIncoming(){
                     <i class="fas fa-clipboard-check"></i> Verify Manifest</button></td>
             </tr>`;
         });
-        $('#incomingTable tbody').html(html || '<tr><td colspan="8" class="text-center text-muted">No inbound trips right now.</td></tr>');
+        $('#incomingTable tbody').html(html || '<tr><td colspan="10" class="text-center text-muted py-4">No arrived inbound trips are awaiting warehouse receiving for <?= h($branch_name ?: 'this branch') ?>.</td></tr>');
     },'json').fail(()=>toast('Server error.',false));
 }
 
@@ -292,30 +332,36 @@ function loadManifest(tripId){
               <td><strong>${esc(it.shipment_number)}</strong><br><small>${esc(it.tracking_number||'')}</small></td>
               <td>${esc(it.cargo_description||'')}</td>
               <td>${esc(it.receiver_name||'')}</td>
-              <td class="text-center"><strong>${it.expected_qty}</strong></td>
+              <td class="text-center"><strong>${esc(it.expected_label || it.expected_qty)}</strong></td>
               <td><span class="badge ${done?'badge-success':'badge-warning'}">${esc(it.current_status)}</span></td>
               <td>`;
             if(!done){
               rows += `<form class="form-inline recv-form" data-trip="${t.id}" data-ship="${it.shipment_id}" data-expected="${it.expected_qty}">
-                <input type="number" name="received_qty" class="form-control form-control-sm mr-1" style="width:80px" value="${it.expected_qty}" min="0">
+                <input type="number" name="received_qty" class="form-control form-control-sm mr-1" style="width:80px" value="${it.expected_qty}" min="0" title="Received quantity">
                 <select name="discrepancy" class="form-control form-control-sm mr-1">
                   <option value="none">Full OK</option><option value="shortage">Shortage</option>
+                  <option value="missing">Missing</option><option value="partial">Partial</option>
                   <option value="excess">Excess</option><option value="damage">Damage</option>
                 </select>
-                <input type="text" name="zone" class="form-control form-control-sm mr-1" placeholder="Zone" style="width:70px" required>
-                <input type="text" name="rack" class="form-control form-control-sm mr-1" placeholder="Rack" style="width:80px" required>
+                <select name="condition" class="form-control form-control-sm mr-1">
+                  <option value="good">Good</option><option value="damaged">Damaged</option>
+                  <option value="wet">Wet</option><option value="torn">Torn</option>
+                </select>
+                <input type="text" name="zone" class="form-control form-control-sm mr-1" placeholder="Zone" style="width:90px" required>
+                <input type="text" name="storage_location" class="form-control form-control-sm mr-1" placeholder="Storage Location" style="width:150px" required>
                 <input type="text" name="notes" class="form-control form-control-sm mr-1" placeholder="Note (optional)">
                 <button class="btn btn-sm btn-success">Receive</button>
               </form>`;
             } else { rows += '<em class="text-muted">Receipted</em>'; }
             rows += `</td></tr>`;
         });
+        const expectedTotal = res.items.reduce((a,b)=>a+Number(b.expected_qty),0);
         $('#manifestBody').html(`
           <p><strong>Trip:</strong> ${esc(t.trip_number)} — <strong>Status:</strong> ${esc(t.status)}<br>
-             Expected total on manifest: <strong>${esc(String(res.items.reduce((a,b)=>a+Number(b.expected_qty),0)))}</strong></p>
+             Expected total on manifest: <strong>${esc(String(expectedTotal))}</strong></p>
           <div class="table-responsive"><table class="table table-sm table-hover">
             <thead class="bg-light"><tr><th>Shipment</th><th>Cargo</th><th>Receiver</th>
-              <th class="text-center">Expected Qty</th><th>Status</th><th>Receive / Verify</th></tr></thead>
+              <th class="text-center">Expected</th><th>Status</th><th>Received / Discrepancy / Condition / Zone / Storage Location</th></tr></thead>
             <tbody>${rows}</tbody></table></div>`);
         $('#manifestModal').modal('show');
     },'json');
@@ -338,6 +384,3 @@ $(function(){
     });
 });
 </script>
-</body>
-</html>
-<?php require_once __DIR__ . '/../includes/footer.php'; ?>
