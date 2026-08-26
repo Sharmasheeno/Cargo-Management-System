@@ -78,7 +78,23 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['ajax_action'])) {
               )
             ORDER BY FIELD(t.status,'in_transit','delivered','completed'), t.departed_at DESC");
         $st->execute([$tenant_id, $assigned_branch_id]);
-        jsonOut(['success' => true, 'rows' => $st->fetchAll(PDO::FETCH_ASSOC)]);
+        $rows = $st->fetchAll(PDO::FETCH_ASSOC);
+        // Trip status column stores the vehicle lifecycle ('delivered' = truck
+        // reached the destination branch). At this screen the shipment is NOT
+        // customer-delivered yet — the warehouse still has to verify the
+        // manifest and receive the cargo. Provide a user-facing label that
+        // reflects the receiving stage so cashiers/supervisors don't read
+        // "delivered" as "customer collected".
+        foreach ($rows as &$_r) {
+            $_r['status_label'] = match ((string)$_r['status']) {
+                'in_transit' => 'In Transit',
+                'delivered'  => 'Awaiting Warehouse Verification',
+                'completed'  => 'Warehouse Receipted',
+                default      => ucwords(str_replace('_', ' ', (string)$_r['status'])),
+            };
+        }
+        unset($_r);
+        jsonOut(['success' => true, 'rows' => $rows]);
     }
 
     // Manifest verification view: expected vs received per shipment.
@@ -304,7 +320,7 @@ function loadIncoming(){
             html += `<tr>
                 <td><strong>${esc(t.trip_number)}</strong></td>
                 <td>${esc(t.origin_name||'')}</td>
-                <td>${arrived}<br><span class="badge badge-info">${esc(t.status)}</span></td>
+                <td>${arrived}<br><span class="badge badge-info" title="${esc(t.status)}">${esc(t.status_label || t.status)}</span></td>
                 <td>${esc(t.truck_plate||'')}</td><td>${esc(t.driver_name||'')}</td>
                 <td>${esc(t.container_number||'')}</td>
                 <td class="text-center">${esc(t.shipment_count)}</td>
