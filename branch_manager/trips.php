@@ -226,12 +226,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['ajax_action'])) {
                         </td>
                         <td>
                             <button class="btn btn-sm btn-info view-trip" data-id="<?= (int)$r['id'] ?>" title="View"><i class="fas fa-eye"></i></button>
-                            <?php if ($r['status'] !== 'completed'): ?>
-                                <button class="btn btn-sm btn-primary advance-trip" data-id="<?= (int)$r['id'] ?>" data-status="<?= h($r['status']) ?>" title="Advance Status"><i class="fas fa-forward"></i></button>
-                            <?php endif; ?>
-                            <button class="btn btn-sm btn-secondary edit-trip" data-id="<?= (int)$r['id'] ?>" title="Edit Driver/Truck"><i class="fas fa-edit"></i></button>
+                            <?php // Separation of duties: Branch Manager approves/rejects only.
+                            //  Advance/Edit belong to Logistics Supervisor on staff/trips.php. ?>
                             <?php if (($r['approval_status'] ?? '') === 'pending_approval' && !in_array($r['status'], ['in_transit','delivered','completed'], true)): ?>
                                 <button class="btn btn-sm btn-success approve-dispatch" data-id="<?= (int)$r['id'] ?>" title="Approve Dispatch"><i class="fas fa-clipboard-check"></i> Approve</button>
+                                <button class="btn btn-sm btn-danger reject-dispatch" data-id="<?= (int)$r['id'] ?>" title="Reject Dispatch"><i class="fas fa-times-circle"></i> Reject</button>
                             <?php endif; ?>
                         </td>
                     </tr>
@@ -303,6 +302,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['ajax_action'])) {
     }
 
     if ($action === 'create_trip') {
+        // Separation of duties: Branch Manager approves/rejects only; trip
+        // creation and dispatch belong to Logistics Supervisor.
+        jsonOut(['success' => false, 'message' => 'Branch Manager cannot create trips. Trip creation is a Logistics Supervisor responsibility.']);
         $container_id = postInt('container_id');
         $driver_name = postString('driver_name');
         $driver_phone = postString('driver_phone');
@@ -363,6 +365,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['ajax_action'])) {
     }
 
     if ($action === 'advance_trip_status') {
+        // Separation of duties: Branch Manager cannot dispatch or advance a
+        // trip's lifecycle; that belongs to Logistics Supervisor via
+        // staff/trips.php after the Branch Manager has approved dispatch.
+        jsonOut(['success' => false, 'message' => 'Branch Manager cannot advance trip status. Dispatch is a Logistics Supervisor responsibility after approval.']);
         $id = postInt('id');
         $new_status = postString('status');
         global $trip_statuses;
@@ -537,7 +543,9 @@ require_once __DIR__ . '/../includes/header.php';
             <h3><i class="fas fa-road"></i> Trips</h3>
             <small>Branch: <?= h($branch_name) ?> <?= !empty($current_branch['branch_code']) ? '(' . h($current_branch['branch_code']) . ')' : '' ?></small>
         </div>
-        <button class="btn btn-light" data-toggle="modal" data-target="#createTripModal"><i class="fas fa-plus-circle"></i> New Trip</button>
+        <?php /* Separation of duties: Branch Manager reviews/approves trips
+                 but does not create them. Trip creation lives on the
+                 Logistics Supervisor's staff/trips.php page. */ ?>
     </div>
 
     <div class="row mb-3">
@@ -766,6 +774,15 @@ $(document).on('click', '.approve-dispatch', function() {
     if (!confirm('Approve dispatch of this trip? Validations (container, manifest, driver, truck) will be checked.')) return;
     $.post('', { ajax_action: 'approve_dispatch', id: id }, function(res) {
         toast(res.message || (res.success ? 'Approved' : 'Error'));
+        if (res.success) loadTrips(currentPage);
+    }, 'json').fail(function() { toast('Server error.'); });
+});
+$(document).on('click', '.reject-dispatch', function() {
+    const id = $(this).data('id');
+    const reason = prompt('Reject dispatch of this trip? Please enter the reason for rejection:');
+    if (reason === null) return;
+    $.post('', { ajax_action: 'reject_dispatch', id: id, notes: reason }, function(res) {
+        toast(res.message || (res.success ? 'Rejected' : 'Error'));
         if (res.success) loadTrips(currentPage);
     }, 'json').fail(function() { toast('Server error.'); });
 });

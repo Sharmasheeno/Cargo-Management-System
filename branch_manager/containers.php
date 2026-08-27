@@ -2046,9 +2046,23 @@ document.addEventListener('click', function(e) {
 });
 
 function postAjax(data, success, fail) {
+    // Native fetch() bypasses the shared jQuery ajaxSetup CSRF shim in
+    // includes/footer.php, so attach the token explicitly from the
+    // <meta name="csrf-token"> tag rendered by includes/header.php.
+    var _csrfMeta = document.querySelector('meta[name="csrf-token"]');
+    var _csrfTok = _csrfMeta ? _csrfMeta.getAttribute('content') : '';
+    var body;
+    if (data instanceof FormData) {
+        body = data;
+        if (_csrfTok && !body.has('csrf_token')) body.append('csrf_token', _csrfTok);
+    } else {
+        body = new URLSearchParams(data);
+        if (_csrfTok && !body.has('csrf_token')) body.append('csrf_token', _csrfTok);
+    }
     fetch('', {
         method: 'POST',
-        body: data instanceof FormData ? data : new URLSearchParams(data)
+        headers: { 'X-CSRF-Token': _csrfTok },
+        body: body
     })
     .then(r => r.json())
     .then(success)
