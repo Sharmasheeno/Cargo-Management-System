@@ -301,8 +301,46 @@ $message = '';
 $message_type = '';
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
+    require_once __DIR__ . '/../includes/admin_audit.php';
     $action = $_POST['action'] ?? '';
-    
+
+    // Snapshot the current value of every setting key so before/after audit
+    // deltas can be recorded per action. Sensitive keys (whatsapp_token /
+    // sms_api_key / sms_api_secret / smtp_password / *_password / *_secret /
+    // *_token / api_key) are masked by admin_audit_mask_sensitive() before
+    // the audit row is written.
+    $settings_snapshot = function(array $keys) use ($pdo, $session_tenant_id): array {
+        if (empty($keys)) return [];
+        $in = implode(',', array_fill(0, count($keys), '?'));
+        $stmt = $pdo->prepare("SELECT setting_key, setting_value FROM system_settings WHERE tenant_id = ? AND setting_key IN ($in)");
+        $stmt->execute(array_merge([$session_tenant_id], $keys));
+        $out = [];
+        foreach ($keys as $k) { $out[$k] = null; }
+        foreach ($stmt->fetchAll(PDO::FETCH_ASSOC) as $row) {
+            $out[$row['setting_key']] = $row['setting_value'];
+        }
+        return $out;
+    };
+    // Central audit record for a settings mutation. Records only when the
+    // caller has observed a successful commit and passes the pre-mutation
+    // snapshot. Records TENANT_SETTINGS_UPDATED with the section label so
+    // reviewers can see which panel was changed.
+    $settings_audit = function(string $section, array $keys, array $before) use ($pdo, $session_tenant_id, $settings_snapshot): void {
+        $after = $settings_snapshot($keys);
+        // Include a section tag so before/after arrays remain human-readable.
+        $before_out = ['_section' => $section] + $before;
+        $after_out  = ['_section' => $section] + $after;
+        record_admin_audit(
+            $pdo,
+            'TENANT_SETTINGS_UPDATED',
+            'tenants',
+            (int)$session_tenant_id,
+            $before_out,
+            $after_out,
+            (int)$session_tenant_id
+        );
+    };
+
     // Helper function to update settings
     $updateSetting = function($key, $value) use ($pdo, $session_tenant_id, $user_id) {
         // Check if record exists for this tenant
@@ -331,10 +369,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $general_settings = [
             'system_name', 'system_timezone', 'date_format', 'time_format',
             'default_language', 'default_currency', 'currency_symbol', 'currency_position',
-            'items_per_page', 'company_name', 'company_email', 'company_phone', 
+            'items_per_page', 'company_name', 'company_email', 'company_phone',
             'company_address', 'company_website', 'company_tax_number', 'company_registration_number'
         ];
-        
+        $__audit_before = $settings_snapshot($general_settings);
         try {
             $pdo->beginTransaction();
             foreach ($general_settings as $key) {
@@ -375,9 +413,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             }
             
             $pdo->commit();
+            $settings_audit('general', $general_settings, $__audit_before);
             $message = "✅ General settings saved successfully!";
             $message_type = "success";
-            
+
             // Refresh settings
             $stmt = $pdo->prepare("SELECT setting_key, setting_value FROM system_settings WHERE tenant_id = ?");
             $stmt->execute([$session_tenant_id]);
@@ -399,7 +438,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             'loyalty_points_on_invoice', 'loyalty_points_on_cbm', 'loyalty_points_on_money',
             'loyalty_max_discount_percent', 'loyalty_birthday_points', 'loyalty_referral_points'
         ];
-        
+        $__audit_before = $settings_snapshot($loyalty_settings);
         try {
             $pdo->beginTransaction();
             foreach ($loyalty_settings as $key) {
@@ -427,6 +466,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             ]);
             
             $pdo->commit();
+            $settings_audit('loyalty', $loyalty_settings, $__audit_before);
             $message = "✅ Loyalty settings saved successfully!";
             $message_type = "success";
         } catch (PDOException $e) {
@@ -442,7 +482,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             'tax_authority_name', 'tax_authority_email', 'tax_authority_phone', 
             'tax_office_address', 'tax_number', 'tax_invoice_include', 'tax_rounding'
         ];
-        
+        $__audit_before = $settings_snapshot($tax_settings);
         try {
             $pdo->beginTransaction();
             foreach ($tax_settings as $key) {
@@ -454,6 +494,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 $updateSetting($key, $value);
             }
             $pdo->commit();
+            $settings_audit('tax', $tax_settings, $__audit_before);
             $message = "✅ Tax settings saved successfully!";
             $message_type = "success";
         } catch (PDOException $e) {
@@ -465,7 +506,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     
     elseif ($action === 'save_invoice') {
         $invoice_settings = ['invoice_prefix', 'invoice_due_days', 'invoice_terms', 'invoice_footer', 'invoice_show_qr', 'invoice_auto_send'];
-        
+        $__audit_before = $settings_snapshot($invoice_settings);
         try {
             $pdo->beginTransaction();
             foreach ($invoice_settings as $key) {
@@ -477,6 +518,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 $updateSetting($key, $value);
             }
             $pdo->commit();
+            $settings_audit('invoice', $invoice_settings, $__audit_before);
             $message = "✅ Invoice settings saved successfully!";
             $message_type = "success";
         } catch (PDOException $e) {
@@ -488,7 +530,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     
     elseif ($action === 'save_receipt') {
         $receipt_settings = ['receipt_prefix', 'receipt_footer', 'receipt_show_points', 'receipt_show_discount'];
-        
+        $__audit_before = $settings_snapshot($receipt_settings);
         try {
             $pdo->beginTransaction();
             foreach ($receipt_settings as $key) {
@@ -500,6 +542,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 $updateSetting($key, $value);
             }
             $pdo->commit();
+            $settings_audit('receipt', $receipt_settings, $__audit_before);
             $message = "✅ Receipt settings saved successfully!";
             $message_type = "success";
         } catch (PDOException $e) {
@@ -510,8 +553,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     }
     
     elseif ($action === 'save_payment') {
-        $payment_settings = ['payment_prefix', 'allow_partial_payment', 'minimum_payment_percent'];
-        
+        $payment_settings = ['payment_prefix', 'allow_partial_payment', 'minimum_payment_percent', 'payment_methods'];
+        $__audit_before = $settings_snapshot($payment_settings);
         try {
             $pdo->beginTransaction();
             foreach ($payment_settings as $key) {
@@ -528,6 +571,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $updateSetting('payment_methods', json_encode($payment_methods));
             
             $pdo->commit();
+            $settings_audit('payment', $payment_settings, $__audit_before);
             $message = "✅ Payment settings saved successfully!";
             $message_type = "success";
         } catch (PDOException $e) {
@@ -539,18 +583,21 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     
     elseif ($action === 'save_whatsapp') {
         $whatsapp_settings = ['whatsapp_enabled', 'whatsapp_provider', 'whatsapp_api_url', 'whatsapp_token', 'whatsapp_instance_id', 'whatsapp_sender_number'];
-        
+        $__audit_before = $settings_snapshot($whatsapp_settings);
         try {
             $pdo->beginTransaction();
             foreach ($whatsapp_settings as $key) {
                 if ($key === 'whatsapp_enabled') {
                     $value = isset($_POST[$key]) ? '1' : '0';
+                } elseif ($key === 'whatsapp_token' && trim((string)($_POST[$key] ?? '')) === '') {
+                    continue;
                 } else {
                     $value = $_POST[$key] ?? $settings[$key] ?? '';
                 }
                 $updateSetting($key, $value);
             }
             $pdo->commit();
+            $settings_audit('whatsapp', $whatsapp_settings, $__audit_before);
             $message = "✅ WhatsApp settings saved successfully!";
             $message_type = "success";
         } catch (PDOException $e) {
@@ -562,18 +609,21 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     
     elseif ($action === 'save_sms') {
         $sms_settings = ['sms_enabled', 'sms_provider', 'sms_api_key', 'sms_api_secret', 'sms_from_number'];
-        
+        $__audit_before = $settings_snapshot($sms_settings);
         try {
             $pdo->beginTransaction();
             foreach ($sms_settings as $key) {
                 if ($key === 'sms_enabled') {
                     $value = isset($_POST[$key]) ? '1' : '0';
+                } elseif (in_array($key, ['sms_api_key', 'sms_api_secret'], true) && trim((string)($_POST[$key] ?? '')) === '') {
+                    continue;
                 } else {
                     $value = $_POST[$key] ?? $settings[$key] ?? '';
                 }
                 $updateSetting($key, $value);
             }
             $pdo->commit();
+            $settings_audit('sms', $sms_settings, $__audit_before);
             $message = "✅ SMS settings saved successfully!";
             $message_type = "success";
         } catch (PDOException $e) {
@@ -589,7 +639,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             'invoice_created_notify', 'payment_received_notify', 'container_shipped_notify',
             'container_arrived_notify', 'package_delivered_notify', 'debt_reminder_days'
         ];
-        
+        $__audit_before = $settings_snapshot($notification_settings);
         try {
             $pdo->beginTransaction();
             foreach ($notification_settings as $key) {
@@ -603,6 +653,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 $updateSetting($key, $value);
             }
             $pdo->commit();
+            $settings_audit('notification', $notification_settings, $__audit_before);
             $message = "✅ Notification settings saved successfully!";
             $message_type = "success";
         } catch (PDOException $e) {
@@ -614,7 +665,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     
     elseif ($action === 'save_security') {
         $security_settings = ['session_timeout', 'max_login_attempts', 'lockout_time', 'password_expiry_days', 'two_factor_auth', 'force_strong_password'];
-        
+        $__audit_before = $settings_snapshot($security_settings);
         try {
             $pdo->beginTransaction();
             foreach ($security_settings as $key) {
@@ -626,6 +677,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 $updateSetting($key, $value);
             }
             $pdo->commit();
+            $settings_audit('security', $security_settings, $__audit_before);
             $message = "✅ Security settings saved successfully!";
             $message_type = "success";
         } catch (PDOException $e) {
@@ -637,7 +689,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     
     elseif ($action === 'save_limits') {
         $limit_settings = ['max_file_size', 'max_containers_per_page', 'max_trips_per_page', 'max_customers_per_page', 'max_invoices_per_page', 'max_stock_items', 'backup_retention_days'];
-        
+        $__audit_before = $settings_snapshot($limit_settings);
         try {
             $pdo->beginTransaction();
             foreach ($limit_settings as $key) {
@@ -645,6 +697,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 $updateSetting($key, $value);
             }
             $pdo->commit();
+            $settings_audit('limits', $limit_settings, $__audit_before);
             $message = "✅ System limits saved successfully!";
             $message_type = "success";
         } catch (PDOException $e) {
@@ -656,7 +709,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     
     elseif ($action === 'save_branch') {
         $branch_settings = ['branch_enabled', 'allow_branch_transfer', 'default_branch_id'];
-        
+        $__audit_before = $settings_snapshot($branch_settings);
         try {
             $pdo->beginTransaction();
             foreach ($branch_settings as $key) {
@@ -668,6 +721,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 $updateSetting($key, $value);
             }
             $pdo->commit();
+            $settings_audit('branch', $branch_settings, $__audit_before);
             $message = "✅ Branch settings saved successfully!";
             $message_type = "success";
         } catch (PDOException $e) {
@@ -679,7 +733,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     
     elseif ($action === 'save_storage') {
         $storage_settings = ['storage_fee_enabled', 'storage_free_days', 'storage_fee_per_day', 'storage_fee_per_cbm'];
-        
+        $__audit_before = $settings_snapshot($storage_settings);
         try {
             $pdo->beginTransaction();
             foreach ($storage_settings as $key) {
@@ -691,6 +745,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 $updateSetting($key, $value);
             }
             $pdo->commit();
+            $settings_audit('storage', $storage_settings, $__audit_before);
             $message = "✅ Storage settings saved successfully!";
             $message_type = "success";
         } catch (PDOException $e) {
@@ -702,7 +757,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     
     elseif ($action === 'save_report') {
         $report_settings = ['report_auto_generate', 'report_email_recipients', 'report_retention_days'];
-        
+        $__audit_before = $settings_snapshot($report_settings);
         try {
             $pdo->beginTransaction();
             foreach ($report_settings as $key) {
@@ -714,6 +769,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 $updateSetting($key, $value);
             }
             $pdo->commit();
+            $settings_audit('report', $report_settings, $__audit_before);
             $message = "✅ Report settings saved successfully!";
             $message_type = "success";
         } catch (PDOException $e) {
@@ -1638,7 +1694,7 @@ require_once __DIR__ . '/../includes/header.php';
             
             <div class="form-group">
                 <label>API Token</label>
-                <input type="password" name="whatsapp_token" value="<?= htmlspecialchars($settings['whatsapp_token'] ?? '') ?>">
+                <input type="password" name="whatsapp_token" value="" placeholder="<?= !empty($settings['whatsapp_token']) ? 'Saved token hidden — leave blank to keep existing' : 'Enter API token' ?>">
             </div>
             
             <div class="form-group">
@@ -1697,12 +1753,12 @@ require_once __DIR__ . '/../includes/header.php';
             
             <div class="form-group">
                 <label>API Key</label>
-                <input type="password" name="sms_api_key" value="<?= htmlspecialchars($settings['sms_api_key'] ?? '') ?>">
+                <input type="password" name="sms_api_key" value="" placeholder="<?= !empty($settings['sms_api_key']) ? 'Saved key hidden — leave blank to keep existing' : 'Enter API key' ?>">
             </div>
             
             <div class="form-group">
                 <label>API Secret</label>
-                <input type="password" name="sms_api_secret" value="<?= htmlspecialchars($settings['sms_api_secret'] ?? '') ?>">
+                <input type="password" name="sms_api_secret" value="" placeholder="<?= !empty($settings['sms_api_secret']) ? 'Saved secret hidden — leave blank to keep existing' : 'Enter API secret' ?>">
             </div>
             
             <button type="submit" class="btn-save"><i class="fas fa-save"></i> Save SMS Settings</button>
