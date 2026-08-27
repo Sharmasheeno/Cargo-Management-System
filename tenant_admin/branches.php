@@ -405,7 +405,14 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['ajax_action'])) {
     }
     
     elseif ($action === 'save_branch') {
-        $id = $_POST['branch_id'] ?? '';
+        require_once __DIR__ . '/../includes/admin_audit.php';
+        // Accept id from either the specific `branch_id` key or a generic
+        // `id` post key. A supplied id > 0 always means UPDATE and must
+        // never silently fall through to CREATE if the id is unowned.
+        $raw_id_specific = $_POST['branch_id'] ?? '';
+        $raw_id_generic  = $_POST['id'] ?? '';
+        $id = ($raw_id_specific !== '' ? $raw_id_specific : $raw_id_generic);
+        $update_intent = ($id !== '' && (int)$id > 0);
         $tenant_id = $session_tenant_id;
         $branch_code = strtoupper(trim($_POST['branch_code'] ?? ''));
         $branch_name = trim($_POST['branch_name'] ?? '');
@@ -430,7 +437,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['ajax_action'])) {
         }
         
         try {
-            if (empty($id)) {
+            if (!$update_intent) {
                 // Check if branch code already exists for this tenant
                 $check = $pdo->prepare("SELECT id FROM branches WHERE branch_code = ? AND tenant_id = ?");
                 $check->execute([$branch_code, $tenant_id]);
@@ -468,12 +475,17 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['ajax_action'])) {
                     }
                 }
                 
+                record_admin_audit($pdo, 'BRANCH_CREATED', 'branches', (int)$new_branch_id,
+                    null,
+                    ['branch_code' => $branch_code, 'branch_name' => $branch_name, 'branch_type' => $branch_type, 'status' => $status],
+                    $tenant_id);
                 echo json_encode(['success' => true, 'message' => $message, 'user_result' => $user_result]);
             } else {
-                // Verify branch belongs to this tenant
-                $check = $pdo->prepare("SELECT id FROM branches WHERE id = ? AND tenant_id = ?");
-                $check->execute([$id, $tenant_id]);
-                if (!$check->fetch()) {
+                // Verify branch belongs to this tenant. Fetch row for audit before/after.
+                $check = $pdo->prepare("SELECT id, branch_code, branch_name, branch_type, status, address, phone, email, manager_name FROM branches WHERE id = ? AND tenant_id = ?");
+                $check->execute([(int)$id, $tenant_id]);
+                $existing_branch = $check->fetch(PDO::FETCH_ASSOC);
+                if (!$existing_branch) {
                     echo json_encode(['success' => false, 'message' => 'Branch not found or you do not have permission']);
                     exit;
                 }
@@ -515,6 +527,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['ajax_action'])) {
                     }
                 }
                 
+                record_admin_audit($pdo, 'BRANCH_UPDATED', 'branches', (int)$id,
+                    $existing_branch,
+                    ['branch_code' => $branch_code, 'branch_name' => $branch_name, 'branch_type' => $branch_type, 'status' => $status, 'address' => $address, 'phone' => $phone, 'email' => $email, 'manager_name' => $manager_name],
+                    $tenant_id);
                 echo json_encode(['success' => true, 'message' => $message]);
             }
         } catch (PDOException $e) {
@@ -522,7 +538,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['ajax_action'])) {
         }
         exit;
     }
-    
+
     elseif ($action === 'delete_branch') {
         $id = $_POST['id'] ?? 0;
         try {

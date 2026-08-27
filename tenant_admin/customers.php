@@ -424,7 +424,14 @@ if ($action) {
     }
     
     elseif ($action === 'save_customer') {
-        $id = $_POST['customer_id'] ?? '';
+        require_once __DIR__ . '/../includes/admin_audit.php';
+        // Accept id from either `customer_id` or generic `id`. A supplied
+        // id > 0 always means UPDATE and must never silently fall through
+        // to CREATE if the id is unowned/unknown.
+        $raw_id_specific = $_POST['customer_id'] ?? '';
+        $raw_id_generic  = $_POST['id'] ?? '';
+        $id = ($raw_id_specific !== '' ? $raw_id_specific : $raw_id_generic);
+        $update_intent = ($id !== '' && (int)$id > 0);
         $customer_name = trim($_POST['customer_name'] ?? '');
         $phone = trim($_POST['phone'] ?? '');
         $email = trim($_POST['email'] ?? '');
@@ -441,8 +448,8 @@ if ($action) {
         
         try {
             $pdo->beginTransaction();
-            
-            if (empty($id)) {
+
+            if (!$update_intent) {
                 // CHECK: Email duplicate
                 if (!empty($email)) {
                     $check_email = $pdo->prepare("SELECT id FROM customers WHERE email = ? AND tenant_id = ?");
@@ -478,9 +485,22 @@ if ($action) {
                 $stmt->execute([$tenant_id, $customer_name, $phone, $email, $address, $credit_limit, $payment_terms, $is_active, $_SESSION['user_id']]);
                 $new_customer_id = $pdo->lastInsertId();
                 
+                record_admin_audit($pdo, 'CUSTOMER_CREATED', 'customers', (int)$new_customer_id,
+                    null,
+                    ['customer_name' => $customer_name, 'email' => $email, 'phone' => $phone, 'is_active' => $is_active],
+                    $tenant_id);
                 $pdo->commit();
                 echo json_encode(['success' => true, 'message' => "✅ Customer '$customer_name' has been added!", 'customer_id' => $new_customer_id]);
             } else {
+                // Ownership gate: an update id must belong to this tenant.
+                $own_chk = $pdo->prepare("SELECT id, customer_name, phone, email, address, is_active FROM customers WHERE id = ? AND tenant_id = ?");
+                $own_chk->execute([(int)$id, $tenant_id]);
+                $existing_customer = $own_chk->fetch(PDO::FETCH_ASSOC);
+                if (!$existing_customer) {
+                    $pdo->rollBack();
+                    echo json_encode(['success' => false, 'message' => 'Customer not found or you do not have permission']);
+                    exit;
+                }
                 // CHECK: Email duplicate for update
                 if (!empty($email)) {
                     $check_email = $pdo->prepare("SELECT id FROM customers WHERE email = ? AND id != ? AND tenant_id = ?");
@@ -524,6 +544,10 @@ if ($action) {
                     $update_user->execute([$customer_name, $email, $phone, $user_account['id'], $tenant_id]);
                 }
                 
+                record_admin_audit($pdo, 'CUSTOMER_UPDATED', 'customers', (int)$id,
+                    $existing_customer,
+                    ['customer_name' => $customer_name, 'email' => $email, 'phone' => $phone, 'address' => $address, 'is_active' => $is_active],
+                    $tenant_id);
                 $pdo->commit();
                 echo json_encode(['success' => true, 'message' => "✅ Customer '$customer_name' has been updated!"]);
             }
@@ -535,7 +559,7 @@ if ($action) {
         }
         exit;
     }
-    
+
     // CREATE USER ACCOUNT with PASSWORD = 123
     elseif ($action === 'create_user_account') {
         $customer_id = isset($_POST['customer_id']) ? (int)$_POST['customer_id'] : 0;
@@ -581,12 +605,17 @@ if ($action) {
                 }
             }
             
-            // FIXED: Use static password '123' instead of random
-            $default_password = '123';
-            $hashed_password = password_hash($default_password, PASSWORD_DEFAULT);
-            
-            // Create user account
-            $sql = "INSERT INTO users (tenant_id, email, password_hash, full_name, phone, role_type, is_active, created_by, created_at) 
+            // Secure temporary-password provisioning (replaces legacy fixed '123').
+            $alphabet = 'ABCDEFGHIJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789';
+            $temporary_password = '';
+            for ($i = 0; $i < 12; $i++) {
+                $temporary_password .= $alphabet[random_int(0, strlen($alphabet) - 1)];
+            }
+            $hashed_password = password_hash($temporary_password, PASSWORD_DEFAULT);
+
+            $pdo->beginTransaction();
+            // Create user account + link customer.user_id in a single transaction
+            $sql = "INSERT INTO users (tenant_id, email, password_hash, full_name, phone, role_type, is_active, created_by, created_at)
                     VALUES (?, ?, ?, ?, ?, 'customer', ?, ?, NOW())";
             $stmt = $pdo->prepare($sql);
             $stmt->execute([
@@ -598,33 +627,40 @@ if ($action) {
                 $customer['is_active'],
                 $_SESSION['user_id']
             ]);
-            
+
             $new_user_id = $pdo->lastInsertId();
-            
+
             // Update customer with user_id
             $update = $pdo->prepare("UPDATE customers SET user_id = ? WHERE id = ? AND tenant_id = ?");
             $update->execute([$new_user_id, $customer_id, $session_tenant_id]);
+
+            require_once __DIR__ . '/../includes/admin_audit.php';
+            record_admin_audit($pdo, 'CUSTOMER_LOGIN_LINKED', 'users', (int)$new_user_id,
+                null,
+                ['customer_id' => $customer_id, 'email' => $customer['email'], 'role_type' => 'customer'],
+                $session_tenant_id);
+            $pdo->commit();
 
             // Send credentials automatically by Gmail + WhatsApp
             $notifyData = [
                 'customer_name' => $customer['customer_name'],
                 'email' => $customer['email'],
-                'password' => '123',
+                'password' => $temporary_password,
                 'phone' => $customer['phone']
             ];
             $notify = sendAutomaticCustomerAccessNotifications($notifyData, $tenant_name);
-            
+
             echo json_encode([
-                'success' => true, 
+                'success' => true,
                 'message' => "✅ User account has been created for '{$customer['customer_name']}'! " . $notify['summary'],
                 'user_id' => $new_user_id,
                 'email' => $customer['email'],
-                'password' => '123',
+                'password' => $temporary_password,
                 'customer_name' => $customer['customer_name'],
                 'phone' => $customer['phone'],
                 'notify' => $notify
             ]);
-            
+
         } catch (PDOException $e) {
             echo json_encode(['success' => false, 'message' => 'Error: ' . $e->getMessage()]);
         }

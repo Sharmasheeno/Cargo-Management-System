@@ -38,6 +38,43 @@ try {
     $tenant_name = 'My Company';
 }
 
+// Role conversion helper: keeps drivers.user_id in sync with users.role_type
+// changes without hard-deleting a profile referenced by historical trips.
+if (!function_exists('users_admin_apply_role_conversion')) {
+    function users_admin_apply_role_conversion(PDO $pdo, int $user_id, int $tenant_id,
+        string $old_role, string $new_role, string $full_name, string $phone, int $is_active): void {
+        if ($old_role === $new_role) {
+            if ($new_role === 'driver') {
+                $upd = $pdo->prepare("UPDATE drivers SET full_name = ?, phone = ?, is_active = ?
+                                      WHERE user_id = ? AND tenant_id = ?");
+                $upd->execute([$full_name, $phone, $is_active, $user_id, $tenant_id]);
+            }
+            return;
+        }
+        if ($new_role === 'driver') {
+            // Convert to driver: reactivate the existing profile if one exists
+            // for this user (preserving historical trip linkage), else create one.
+            $find = $pdo->prepare("SELECT id FROM drivers WHERE user_id = ? AND tenant_id = ? LIMIT 1");
+            $find->execute([$user_id, $tenant_id]);
+            $profile_id = (int)$find->fetchColumn();
+            if ($profile_id > 0) {
+                $upd = $pdo->prepare("UPDATE drivers SET full_name = ?, phone = ?, is_active = 1 WHERE id = ?");
+                $upd->execute([$full_name, $phone, $profile_id]);
+            } else {
+                $ins = $pdo->prepare("INSERT INTO drivers (tenant_id, user_id, full_name, phone, is_active, created_by, created_at)
+                                      VALUES (?, ?, ?, ?, 1, ?, NOW())");
+                $ins->execute([$tenant_id, $user_id, $full_name, $phone, $_SESSION['user_id'] ?? null]);
+            }
+        }
+        if ($old_role === 'driver') {
+            // Convert away from driver: deactivate the profile but keep the row
+            // so trucking_trips.driver_id references stay intact.
+            $upd = $pdo->prepare("UPDATE drivers SET is_active = 0 WHERE user_id = ? AND tenant_id = ?");
+            $upd->execute([$user_id, $tenant_id]);
+        }
+    }
+}
+
 // Handle AJAX requests FIRST before any output
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['ajax_action'])) {
     header('Content-Type: application/json');
@@ -252,7 +289,14 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['ajax_action'])) {
     }
     
     elseif ($action === 'save_user') {
-        $id = $_POST['user_id'] ?? '';
+        require_once __DIR__ . '/../includes/admin_audit.php';
+        // Accept id from either the modal's `user_id` or a generic `id` post
+        // key. A supplied id > 0 always means UPDATE and must never silently
+        // fall through to CREATE if the id is unowned/unknown.
+        $raw_id_specific = $_POST['user_id'] ?? '';
+        $raw_id_generic  = $_POST['id'] ?? '';
+        $id = ($raw_id_specific !== '' ? $raw_id_specific : $raw_id_generic);
+        $update_intent = ($id !== '' && (int)$id > 0);
         $tenant_id = $session_tenant_id; // Force tenant_admin's tenant
         $full_name = trim($_POST['full_name'] ?? '');
         $email = trim($_POST['email'] ?? '');
@@ -290,52 +334,95 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['ajax_action'])) {
         
         try {
             $pdo->beginTransaction();
-            
-            if (empty($id)) {
+
+            if (!$update_intent) {
                 // Check if email exists in this tenant
                 $check = $pdo->prepare("SELECT id FROM users WHERE email = ? AND tenant_id = ?");
                 $check->execute([$email, $tenant_id]);
                 if ($check->fetch()) {
+                    $pdo->rollBack();
                     echo json_encode(['success' => false, 'message' => '❌ This email is already in use!']);
                     exit;
                 }
-                
-                // AUTO PASSWORD 123
-                $default_password = '123';
-                $hashed = password_hash($default_password, PASSWORD_DEFAULT);
-                
+
+                // Secure temporary-password provisioning: honor an
+                // admin-supplied password if it meets policy; otherwise
+                // generate a cryptographically random 12-char temporary
+                // password and return it once.
+                $min_password_len = 8;
+                $weak_passwords = ['123', '1234', '12345', '123456', 'password', 'admin', 'test', '0000'];
+                $temp_password_generated = false;
+                if ($password !== '' && strlen($password) >= $min_password_len && !in_array(strtolower($password), $weak_passwords, true)) {
+                    $temporary_password = $password;
+                } else {
+                    $alphabet = 'ABCDEFGHIJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789';
+                    $temporary_password = '';
+                    for ($i = 0; $i < 12; $i++) {
+                        $temporary_password .= $alphabet[random_int(0, strlen($alphabet) - 1)];
+                    }
+                    $temp_password_generated = true;
+                }
+                $hashed = password_hash($temporary_password, PASSWORD_DEFAULT);
+
                 // Insert into users table
-                $sql = "INSERT INTO users (full_name, email, phone, password_hash, role_type, tenant_id, is_active, staff_level, profile_image, created_at) 
+                $sql = "INSERT INTO users (full_name, email, phone, password_hash, role_type, tenant_id, is_active, staff_level, profile_image, created_at)
                         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NOW())";
                 $stmt = $pdo->prepare($sql);
                 $stmt->execute([$full_name, $email, $phone, $hashed, $role_type, $tenant_id, $is_active, $staff_level, $profile_image_path]);
                 $new_user_id = $pdo->lastInsertId();
-                
+
+                // Driver provisioning atomicity: a users row with
+                // role_type=driver is invalid without a paired
+                // drivers.user_id profile. Insert the profile in the same
+                // transaction so a failure on either side rolls back the
+                // entire operation and cannot leave an orphan driver login.
+                if ($role_type === 'driver') {
+                    $driver_license = trim((string)($_POST['license_number'] ?? ''));
+                    $driver_ins = $pdo->prepare("INSERT INTO drivers
+                        (tenant_id, user_id, full_name, phone, license_number, is_active, created_by, created_at)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, NOW())");
+                    $driver_ins->execute([
+                        $tenant_id, (int)$new_user_id, $full_name, $phone,
+                        $driver_license !== '' ? $driver_license : null,
+                        $is_active, $_SESSION['user_id'],
+                    ]);
+                }
+
                 // If role is customer, also add to customers table
                 if ($role_type == 'customer') {
                     // Check if customer already exists with same email or phone
                     $check_customer = $pdo->prepare("SELECT id FROM customers WHERE (email = ? OR phone = ?) AND tenant_id = ?");
                     $check_customer->execute([$email, $phone, $tenant_id]);
                     if (!$check_customer->fetch()) {
-                        $sql_customer = "INSERT INTO customers (tenant_id, user_id, customer_name, phone, email, is_active, created_by, created_at) 
+                        $sql_customer = "INSERT INTO customers (tenant_id, user_id, customer_name, phone, email, is_active, created_by, created_at)
                                          VALUES (?, ?, ?, ?, ?, ?, ?, NOW())";
                         $stmt_customer = $pdo->prepare($sql_customer);
                         $stmt_customer->execute([$tenant_id, $new_user_id, $full_name, $phone, $email, $is_active, $_SESSION['user_id']]);
                     }
                 }
-                
+
+                record_admin_audit($pdo, 'USER_CREATED', 'users', (int)$new_user_id,
+                    null,
+                    ['full_name' => $full_name, 'email' => $email, 'role_type' => $role_type, 'tenant_id' => $tenant_id, 'is_active' => $is_active],
+                    $tenant_id);
+
                 $pdo->commit();
-                echo json_encode(['success' => true, 'message' => "✅ User '$full_name' has been added!<br>🔑 Password: <strong class='text-success'>123</strong>"]);
+                $password_note = $temp_password_generated
+                    ? "<br>🔑 Temporary password (show once): <strong class='text-success'>" . htmlspecialchars($temporary_password, ENT_QUOTES) . "</strong>"
+                    : "<br>🔑 The password you supplied has been set.";
+                echo json_encode(['success' => true, 'message' => "✅ User '$full_name' has been added!" . $password_note]);
             } else {
-                // Verify user belongs to this tenant
-                $check = $pdo->prepare("SELECT tenant_id, role_type FROM users WHERE id = ?");
-                $check->execute([$id]);
-                $existing = $check->fetch();
-                if (!$existing || $existing['tenant_id'] != $tenant_id) {
+                // Verify user belongs to this tenant. Fetch full row for audit.
+                $check = $pdo->prepare("SELECT id, tenant_id, role_type, full_name, email, phone, is_active FROM users WHERE id = ?");
+                $check->execute([(int)$id]);
+                $existing = $check->fetch(PDO::FETCH_ASSOC);
+                if (!$existing || (int)$existing['tenant_id'] !== (int)$tenant_id) {
+                    $pdo->rollBack();
                     echo json_encode(['success' => false, 'message' => 'User not found or you do not have permission']);
                     exit;
                 }
-                
+                $old_role_type = (string)$existing['role_type'];
+
                 if (!empty($password)) {
                     $hashed = password_hash($password, PASSWORD_DEFAULT);
                     $sql = "UPDATE users SET full_name=?, email=?, phone=?, password_hash=?, role_type=?, is_active=?, staff_level=?, profile_image=? WHERE id=? AND tenant_id=?";
@@ -358,6 +445,15 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['ajax_action'])) {
                         }
                     }
                     
+                    users_admin_apply_role_conversion($pdo, (int)$id, $tenant_id, $old_role_type, $role_type, $full_name, $phone, $is_active);
+                    record_admin_audit($pdo, 'USER_UPDATED', 'users', (int)$id,
+                        $existing,
+                        ['full_name' => $full_name, 'email' => $email, 'phone' => $phone, 'role_type' => $role_type, 'is_active' => $is_active, 'password_changed' => true],
+                        $tenant_id);
+                    if ($old_role_type !== $role_type) {
+                        record_admin_audit($pdo, 'USER_ROLE_CHANGED', 'users', (int)$id,
+                            ['role_type' => $old_role_type], ['role_type' => $role_type], $tenant_id);
+                    }
                     echo json_encode(['success' => true, 'message' => "✅ User '$full_name' has been updated!<br>🔑 Password has been changed!"]);
                 } else {
                     $sql = "UPDATE users SET full_name=?, email=?, phone=?, role_type=?, is_active=?, staff_level=?, profile_image=? WHERE id=? AND tenant_id=?";
@@ -380,9 +476,18 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['ajax_action'])) {
                         }
                     }
                     
+                    users_admin_apply_role_conversion($pdo, (int)$id, $tenant_id, $old_role_type, $role_type, $full_name, $phone, $is_active);
+                    record_admin_audit($pdo, 'USER_UPDATED', 'users', (int)$id,
+                        $existing,
+                        ['full_name' => $full_name, 'email' => $email, 'phone' => $phone, 'role_type' => $role_type, 'is_active' => $is_active],
+                        $tenant_id);
+                    if ($old_role_type !== $role_type) {
+                        record_admin_audit($pdo, 'USER_ROLE_CHANGED', 'users', (int)$id,
+                            ['role_type' => $old_role_type], ['role_type' => $role_type], $tenant_id);
+                    }
                     echo json_encode(['success' => true, 'message' => "✅ User '$full_name' has been updated!"]);
                 }
-                
+
                 $pdo->commit();
             }
         } catch (PDOException $e) {
