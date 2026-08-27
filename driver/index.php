@@ -100,6 +100,8 @@ function trip_manifest(PDO $pdo, int $tenant_id, int $container_id): array {
 }
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['ajax_action'])) {
+    require_once __DIR__ . '/../includes/csrf.php';
+    require_csrf_token();
     if ($driver_profile_id <= 0) jsonOut(['success' => false, 'message' => 'No active driver profile is linked to this login.']);
 
     $action = postStr('ajax_action');

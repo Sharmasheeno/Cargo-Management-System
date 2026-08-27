@@ -141,6 +141,8 @@ $status_colors = [
 // AJAX HANDLERS
 // ============================================================
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['ajax_action'])) {
+    require_once __DIR__ . '/../includes/csrf.php';
+    require_csrf_token();
     $action = $_POST['ajax_action'];
 
     try {

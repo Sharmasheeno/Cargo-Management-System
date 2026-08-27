@@ -5,6 +5,7 @@ require_once __DIR__ . '/config/db_connect.php';
 $invoice_number = $_GET['number'] ?? '';
 
 if (empty($invoice_number)) {
+    http_response_code(404);
     die("<h1>Khalad: Lambarka biilka waa lagama maarmaan.</h1>");
 }
 
@@ -24,6 +25,7 @@ try {
     $inv = $stmt->fetch(PDO::FETCH_ASSOC);
 
     if (!$inv) {
+        http_response_code(404);
         die("<h1>Khalad: Biilkan lama helin.</h1>");
     }
 } catch (PDOException $e) {

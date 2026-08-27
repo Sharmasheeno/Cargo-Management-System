@@ -69,6 +69,8 @@ function jsonResult(array $result): void {
 // AJAX ACTIONS (all server-side authorized + tenant/branch scoped)
 // ============================================================================
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['ajax_action'])) {
+    require_once __DIR__ . '/../includes/csrf.php';
+    require_csrf_token();
     $action = postStr('ajax_action');
     $actor = ['performed_by' => $_SESSION['user_id'] ?? null, 'performer_name' => $_SESSION['user_name'] ?? null];
 

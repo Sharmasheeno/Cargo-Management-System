@@ -48,6 +48,8 @@ function load_own_delivery(PDO $pdo, int $tenant_id, int $agent_id, int $da_id):
 }
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['ajax_action'])) {
+    require_once __DIR__ . '/../includes/csrf.php';
+    require_csrf_token();
     $action = postStr('ajax_action');
 
     if ($action === 'my_deliveries') {
