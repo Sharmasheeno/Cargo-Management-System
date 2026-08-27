@@ -738,6 +738,22 @@ $(function() {
             if (res.success) { $('#receiveModal').modal('hide'); loadShipments(currentPage); }
         }, 'json').fail(()=>toast('Server error.', false));
     });
+    // Load into Container / Manifest -- must be an AJAX submit so the
+    // shared jQuery CSRF shim in includes/footer.php can attach the
+    // X-CSRF-Token header. A native form submit bypasses the shim and
+    // the server-side require_csrf_token() gate then returns 403, which
+    // used to look like a silent no-op to the user.
+    $('#loadForm').on('submit', function(e){
+        e.preventDefault();
+        $.post('', $(this).serialize(), function(res){
+            toast(res.message || (res.success ? 'Loaded.' : 'Error'), !!res.success);
+            if (res.success) { $('#loadModal').modal('hide'); loadShipments(currentPage); }
+        }, 'json').fail(function(xhr){
+            var msg = 'Server error.';
+            try { var j = JSON.parse(xhr.responseText); if (j && j.message) msg = j.message; } catch(_) {}
+            toast(msg, false);
+        });
+    });
     $(document).on('click', '.ready-btn', function(){
         if (!confirm('Mark this shipment READY FOR LOADING?')) return;
         $.post('', { ajax_action:'mark_ready', id: $(this).data('id') }, function(res){
