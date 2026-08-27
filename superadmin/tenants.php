@@ -795,8 +795,14 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['ajax_action'])) {
                 ]);
                 
                 $tenant_id = $pdo->lastInsertId();
-                
-                $plainPassword = '123';
+
+                // Secure temporary-password provisioning (replaces legacy fixed '123').
+                require_once __DIR__ . '/../includes/admin_audit.php';
+                $__sa_alphabet = 'ABCDEFGHIJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789';
+                $plainPassword = '';
+                for ($__i = 0; $__i < 12; $__i++) {
+                    $plainPassword .= $__sa_alphabet[random_int(0, strlen($__sa_alphabet) - 1)];
+                }
                 $emailSent = false;
                 
                 if (!empty($admin_name) && !empty($admin_email)) {
@@ -820,8 +826,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['ajax_action'])) {
                     ]);
                 }
                 
+                record_admin_audit($pdo, 'TENANT_CREATED', 'tenants', (int)$tenant_id,
+                    null,
+                    ['name' => $name, 'code' => $code, 'billing_cycle' => $billing_cycle, 'is_active' => $is_active, 'admin_email' => $admin_email],
+                    (int)$tenant_id);
                 $pdo->commit();
-                
+
                 if (!empty($admin_email)) {
                     $emailSent = sendCompanyAdminEmail(
                         $admin_email,
@@ -844,7 +854,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['ajax_action'])) {
                     'success' => true,
                     'message' => "Shirkad '$name' waa la abuuray!<br>
                     Maamulaha: $admin_email<br>
-                    Password: $plainPassword<br>
+                    Password (show once): $plainPassword<br>
                     Login Link: <a href='" . getLoginUrl($custom_login_link) . "' target='_blank'>" . getLoginUrl($custom_login_link) . "</a><br>
                     Billing: $billing_cycle<br>
                     Qiimaha: $" . number_format($subscription_price, 2) . "<br>
@@ -856,12 +866,23 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['ajax_action'])) {
                 exit;
             }
             
-            $sql = "UPDATE tenants SET 
+            // Ownership/existence gate for update: a supplied tenant id must resolve.
+            require_once __DIR__ . '/../includes/admin_audit.php';
+            $__existing_tenant = null;
+            $__t_chk = $pdo->prepare("SELECT id, name, code, is_active, billing_cycle, subscription_price, auto_renew, default_language, timezone FROM tenants WHERE id = ? LIMIT 1");
+            $__t_chk->execute([(int)$id]);
+            $__existing_tenant = $__t_chk->fetch(PDO::FETCH_ASSOC);
+            if (!$__existing_tenant) {
+                echo json_encode(['success' => false, 'message' => 'Tenant not found']);
+                exit;
+            }
+
+            $sql = "UPDATE tenants SET
                     name=?, email=?, phone=?, address=?, is_active=?,
-                    loyalty_cbm_points=?, loyalty_amount_points=?, default_language=?, timezone=?, 
-                    logo_url=?, billing_cycle=?, subscription_price=?, 
-                    subscription_start_date=?, subscription_end_date=?, auto_renew=?, 
-                    custom_login_link=?, updated_at=NOW() 
+                    loyalty_cbm_points=?, loyalty_amount_points=?, default_language=?, timezone=?,
+                    logo_url=?, billing_cycle=?, subscription_price=?,
+                    subscription_start_date=?, subscription_end_date=?, auto_renew=?,
+                    custom_login_link=?, updated_at=NOW()
                     WHERE id=?";
             
             $stmt = $pdo->prepare($sql);
@@ -909,11 +930,16 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['ajax_action'])) {
                         exit;
                     }
                     
-                    $plainPassword = '123';
+                    // Secure temporary-password provisioning (replaces legacy fixed '123').
+                    $__sa_alphabet = 'ABCDEFGHIJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789';
+                    $plainPassword = '';
+                    for ($__i = 0; $__i < 12; $__i++) {
+                        $plainPassword .= $__sa_alphabet[random_int(0, strlen($__sa_alphabet) - 1)];
+                    }
                     $hashed_password = password_hash($plainPassword, PASSWORD_DEFAULT);
-                    
+
                     $sql4 = "INSERT INTO users (
-                        tenant_id, email, password_hash, full_name, phone, role_type, 
+                        tenant_id, email, password_hash, full_name, phone, role_type,
                         is_active, profile_image, created_by, created_at
                     ) VALUES (?, ?, ?, ?, ?, 'company_admin', ?, ?, ?, NOW())";
                     
@@ -933,6 +959,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['ajax_action'])) {
                 }
             }
             
+            record_admin_audit($pdo, 'TENANT_UPDATED', 'tenants', (int)$id,
+                $__existing_tenant,
+                ['name' => $name, 'is_active' => $is_active, 'billing_cycle' => $billing_cycle, 'subscription_price' => $subscription_price, 'auto_renew' => $auto_renew],
+                (int)$id);
             echo json_encode(['success' => true, 'message' => 'Shirkad la cusboonaysiiyay!']);
             exit;
             
@@ -1029,29 +1059,63 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['ajax_action'])) {
                 exit;
             }
             
+            // Safety gate: refuse to hard-delete a tenant with operational data.
+            // Deactivate the tenant instead (soft-shutdown preserves history).
+            $dep = [];
+            foreach ([
+                'shipments' => 'shipments',
+                'containers' => 'containers',
+                'trucking_trips' => 'trucking_trips',
+                'invoices' => 'invoices',
+                'receipts' => 'receipts',
+                'payments' => 'payments',
+                'warehouse_stock' => 'warehouse_stock',
+                'customers' => 'customers',
+                'branches' => 'branches',
+            ] as $label => $tbl) {
+                try {
+                    $q = $pdo->prepare("SELECT COUNT(*) FROM `$tbl` WHERE tenant_id = ?");
+                    $q->execute([$id]);
+                    $n = (int)$q->fetchColumn();
+                    if ($n > 0) $dep[$label] = $n;
+                } catch (Throwable $e) {}
+            }
+            if (!empty($dep)) {
+                echo json_encode([
+                    'success' => false,
+                    'message' => 'Tenant has operational history and cannot be hard-deleted. Deactivate it instead. Dependencies: ' . http_build_query($dep, '', ', '),
+                ]);
+                exit;
+            }
+
+            require_once __DIR__ . '/../includes/admin_audit.php';
             $pdo->beginTransaction();
-            
+
             $stmt2 = $pdo->prepare("DELETE FROM users WHERE tenant_id = ?");
             $stmt2->execute([$id]);
-            
+
             $stmt3 = $pdo->prepare("DELETE FROM tenants WHERE id = ?");
             $stmt3->execute([$id]);
-            
+
+            record_admin_audit($pdo, 'TENANT_DELETED', 'tenants', (int)$id,
+                ['name' => $tenant['name']],
+                null,
+                (int)$id);
             $pdo->commit();
-            
+
             echo json_encode(['success' => true, 'message' => "Shirkad '{$tenant['name']}' waa la tirtiray!"]);
             exit;
-            
+
         } catch (PDOException $e) {
             if ($pdo->inTransaction()) {
                 $pdo->rollBack();
             }
-            
+
             echo json_encode(['success' => false, 'message' => 'Khalad: ' . $e->getMessage()]);
             exit;
         }
     }
-    
+
     if ($action === 'toggle_status') {
         if ($role === 'company_admin') {
             echo json_encode(['success' => false, 'message' => 'Ma laguu ogola inaad beddesho xaaladda']);
@@ -1086,9 +1150,16 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['ajax_action'])) {
             
             $stmt2 = $pdo->prepare("UPDATE users SET is_active = ? WHERE tenant_id = ? AND role_type != 'superadmin'");
             $stmt2->execute([$new_status, $id]);
-            
+
+            require_once __DIR__ . '/../includes/admin_audit.php';
+            record_admin_audit($pdo,
+                $new_status ? 'TENANT_REACTIVATED' : 'TENANT_DEACTIVATED',
+                'tenants', (int)$id,
+                ['is_active' => (int)$tenant['is_active']],
+                ['is_active' => (int)$new_status],
+                (int)$id);
             $pdo->commit();
-            
+
             $message = $new_status
                 ? "✅ Shirkadda '{$tenant['name']}' hadda waa FIRFIRCOON!"
                 : "⚠️ Shirkadda '{$tenant['name']}' hadda waa AAN FIRFIRCOONEYN!";
@@ -1215,9 +1286,14 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['ajax_action'])) {
                 $tenant_id = $pdo->lastInsertId();
                 
                 if (!empty($admin_name) && !empty($admin_email)) {
-                    $plainPassword = '123';
+                    // Secure temporary-password provisioning (replaces legacy fixed '123').
+                    $__sa_alphabet = 'ABCDEFGHIJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789';
+                    $plainPassword = '';
+                    for ($__i = 0; $__i < 12; $__i++) {
+                        $plainPassword .= $__sa_alphabet[random_int(0, strlen($__sa_alphabet) - 1)];
+                    }
                     $hashed_password = password_hash($plainPassword, PASSWORD_DEFAULT);
-                    
+
                     $stmt2 = $pdo->prepare("
                         INSERT INTO users (
                             tenant_id, email, password_hash, full_name, phone, role_type, 

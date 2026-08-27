@@ -350,6 +350,17 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['ajax_action'])) {
         $email = trim($_POST['email'] ?? '');
         $phone = trim($_POST['phone'] ?? '');
         $role_type = $_POST['role_type'] ?? 'staff';
+        // Role allowlist: even Super Admin must not store malformed role strings.
+        $allowed_role_types = [
+            'superadmin', 'tenant_admin', 'company_admin',
+            'branch_manager', 'staff', 'reception_clerk',
+            'warehouse_supervisor', 'logistics_supervisor', 'finance_manager',
+            'clerk', 'driver', 'delivery_agent', 'customer',
+        ];
+        if (!in_array($role_type, $allowed_role_types, true)) {
+            echo json_encode(['success' => false, 'message' => 'Invalid role_type: ' . htmlspecialchars($role_type, ENT_QUOTES)]);
+            exit;
+        }
         $tenant_id = !empty($_POST['tenant_id']) ? (int)$_POST['tenant_id'] : null;
         $is_active = isset($_POST['is_active']) ? (int)$_POST['is_active'] : 1;
         // For customer role, staff_level is always NULL
@@ -394,12 +405,25 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['ajax_action'])) {
                     exit;
                 }
                 
-                // AUTO PASSWORD 123
-                $default_password = '123';
+                // Secure temporary-password provisioning: honor admin-supplied
+                // password when it meets policy, else generate a random 12-char
+                // temporary password. Never persist plaintext.
+                $__sa_alphabet = 'ABCDEFGHIJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789';
+                $weak_passwords = ['123', '1234', '12345', '123456', 'password', 'admin', 'test', '0000'];
+                $sa_temp_generated = false;
+                if ($password !== '' && strlen($password) >= 8 && !in_array(strtolower($password), $weak_passwords, true)) {
+                    $default_password = $password;
+                } else {
+                    $default_password = '';
+                    for ($__i = 0; $__i < 12; $__i++) {
+                        $default_password .= $__sa_alphabet[random_int(0, strlen($__sa_alphabet) - 1)];
+                    }
+                    $sa_temp_generated = true;
+                }
                 $hashed = password_hash($default_password, PASSWORD_DEFAULT);
-                
+
                 // Insert into users table
-                $sql = "INSERT INTO users (full_name, email, phone, password_hash, role_type, tenant_id, is_active, staff_level, profile_image, created_at) 
+                $sql = "INSERT INTO users (full_name, email, phone, password_hash, role_type, tenant_id, is_active, staff_level, profile_image, created_at)
                         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NOW())";
                 $stmt = $pdo->prepare($sql);
                 $stmt->execute([$full_name, $email, $phone, $hashed, $role_type, $tenant_id, $is_active, $staff_level, $profile_image_path]);
@@ -418,8 +442,16 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['ajax_action'])) {
                     }
                 }
                 
+                require_once __DIR__ . '/../includes/admin_audit.php';
+                record_admin_audit($pdo, 'USER_CREATED', 'users', (int)$new_user_id,
+                    null,
+                    ['full_name' => $full_name, 'email' => $email, 'role_type' => $role_type, 'tenant_id' => $tenant_id, 'is_active' => $is_active],
+                    $tenant_id);
                 $pdo->commit();
-                echo json_encode(['success' => true, 'message' => "✅ Isticmaale '$full_name' waa la daray!<br>🔑 Password: <strong class='text-success'>123</strong>"]);
+                $__note = $sa_temp_generated
+                    ? "<br>🔑 Temporary password (show once): <strong class='text-success'>" . htmlspecialchars($default_password, ENT_QUOTES) . "</strong>"
+                    : "<br>🔑 The password you supplied has been set.";
+                echo json_encode(['success' => true, 'message' => "✅ Isticmaale '$full_name' waa la daray!" . $__note]);
             } else {
                 // Update existing user
                 if (!empty($password)) {
@@ -658,8 +690,14 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['ajax_action'])) {
                     $t_id = $session_tenant_id;
                 }
                 
-                $hashed_password = password_hash('123', PASSWORD_DEFAULT);
-                
+                // Secure temporary-password provisioning (replaces legacy fixed '123' in CSV import).
+                $__sa_alphabet = 'ABCDEFGHIJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789';
+                $__temp_pw = '';
+                for ($__i = 0; $__i < 12; $__i++) {
+                    $__temp_pw .= $__sa_alphabet[random_int(0, strlen($__sa_alphabet) - 1)];
+                }
+                $hashed_password = password_hash($__temp_pw, PASSWORD_DEFAULT);
+
                 // Insert user
                 $stmt = $pdo->prepare("INSERT INTO users (tenant_id, email, password_hash, full_name, phone, role_type, staff_level, is_active, created_at) VALUES (?,?,?,?,?,?,?,1,NOW())");
                 $stmt->execute([$t_id, $email, $hashed_password, $full_name, $phone, $role_type, $staff_level]);
@@ -1068,7 +1106,7 @@ require_once __DIR__ . '/../includes/header.php';
                                     <option value="driver">Darawal</option>
                                     <option value="junior_driver">Darawal Cusub</option>
                                     <option value="loader">Raraha</option>
-                                    <option value="clerk">Karani</option>
+                                    <option value="clerk">Assistant Worker</option>
                                     <option value="customer_service">Adeegga Macaamiisha</option>
                                 </select>
                             </div>
