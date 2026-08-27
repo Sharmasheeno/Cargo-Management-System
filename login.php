@@ -160,7 +160,7 @@ function getDashboardRedirect($role) {
         'customer' => 'customer/dashboard.php',
         // Authenticated operational roles with their own portals
         'driver' => 'driver/index.php',
-        'delivery_agent' => 'driver/index.php',
+        'delivery_agent' => 'driver/deliveries.php',
     ];
     
     // Special handling for staff role types

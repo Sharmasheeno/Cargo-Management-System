@@ -171,8 +171,39 @@ $message = '';
 $message_type = '';
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
+    require_once __DIR__ . '/../includes/csrf.php';
+    require_csrf_token();
+    require_once __DIR__ . '/../includes/admin_audit.php';
     $action = $_POST['action'] ?? '';
-    
+
+    // Snapshot the current value of every setting key so before/after audit
+    // deltas can be recorded per action. Sensitive keys are masked by
+    // admin_audit_mask_sensitive() before the audit row is written.
+    $settings_snapshot = function(array $keys) use ($pdo, $tenant_id): array {
+        if (empty($keys)) return [];
+        $in = implode(',', array_fill(0, count($keys), '?'));
+        $stmt = $pdo->prepare("SELECT setting_key, setting_value FROM system_settings WHERE (tenant_id = ? OR tenant_id IS NULL) AND setting_key IN ($in)");
+        $stmt->execute(array_merge([$tenant_id], $keys));
+        $out = [];
+        foreach ($keys as $k) { $out[$k] = null; }
+        foreach ($stmt->fetchAll(PDO::FETCH_ASSOC) as $row) {
+            $out[$row['setting_key']] = $row['setting_value'];
+        }
+        return $out;
+    };
+    $settings_audit = function(string $section, array $keys, array $before) use ($pdo, $settings_snapshot): void {
+        $after = $settings_snapshot($keys);
+        record_admin_audit(
+            $pdo,
+            'PLATFORM_SETTINGS_UPDATED',
+            'settings',
+            null,
+            ['_section' => $section] + $before,
+            ['_section' => $section] + $after,
+            null
+        );
+    };
+
     // Helper function to update settings
     $updateSetting = function($key, $value) use ($pdo, $tenant_id, $user_id) {
         $stmt = $pdo->prepare("
@@ -191,7 +222,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             'system_name', 'system_timezone', 'date_format', 'time_format',
             'default_language', 'default_currency', 'currency_symbol', 'items_per_page'
         ];
-        
+        $__audit_before = $settings_snapshot($general_settings);
         try {
             $pdo->beginTransaction();
             foreach ($general_settings as $key) {
@@ -203,6 +234,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $_SESSION['currency'] = $_POST['default_currency'] ?? 'USD';
             
             $pdo->commit();
+            $settings_audit('general', $general_settings, $__audit_before);
             $message = "General settings saved successfully!";
             $message_type = "success";
         } catch (PDOException $e) {
@@ -214,10 +246,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     
     elseif ($action === 'save_security') {
         $security_settings = [
-            'session_timeout', 'max_login_attempts', 'lockout_time', 
+            'session_timeout', 'max_login_attempts', 'lockout_time',
             'password_expiry_days', 'two_factor_auth', 'ip_whitelist', 'force_ssl'
         ];
-        
+        $__audit_before = $settings_snapshot($security_settings);
         try {
             $pdo->beginTransaction();
             foreach ($security_settings as $key) {
@@ -228,6 +260,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 $updateSetting($key, $value);
             }
             $pdo->commit();
+            $settings_audit('security', $security_settings, $__audit_before);
             $message = "Security settings saved successfully!";
             $message_type = "success";
         } catch (PDOException $e) {
@@ -239,10 +272,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     
     elseif ($action === 'save_email') {
         $email_settings = [
-            'smtp_host', 'smtp_port', 'smtp_encryption', 'smtp_username', 
+            'smtp_host', 'smtp_port', 'smtp_encryption', 'smtp_username',
             'smtp_password', 'from_email', 'from_name'
         ];
-        
+        $__audit_before = $settings_snapshot($email_settings);
         try {
             $pdo->beginTransaction();
             foreach ($email_settings as $key) {
@@ -250,6 +283,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 $updateSetting($key, $value);
             }
             $pdo->commit();
+            $settings_audit('email', $email_settings, $__audit_before);
             $message = "Email settings saved successfully!";
             $message_type = "success";
         } catch (PDOException $e) {
@@ -264,7 +298,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             'sms_provider', 'sms_api_key', 'sms_api_secret', 'sms_from_number', 'sms_enabled',
             'whatsapp_provider', 'whatsapp_api_url', 'whatsapp_token', 'whatsapp_instance_id', 'whatsapp_enabled'
         ];
-        
+        $__audit_before = $settings_snapshot($sms_settings);
         try {
             $pdo->beginTransaction();
             foreach ($sms_settings as $key) {
@@ -275,6 +309,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 $updateSetting($key, $value);
             }
             $pdo->commit();
+            $settings_audit('sms', $sms_settings, $__audit_before);
             $message = "SMS settings saved successfully!";
             $message_type = "success";
         } catch (PDOException $e) {
@@ -288,7 +323,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $backup_settings = [
             'auto_backup', 'backup_frequency', 'backup_time', 'backup_retention_days', 'backup_destination'
         ];
-        
+        $__audit_before = $settings_snapshot($backup_settings);
         try {
             $pdo->beginTransaction();
             foreach ($backup_settings as $key) {
@@ -299,6 +334,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 $updateSetting($key, $value);
             }
             $pdo->commit();
+            $settings_audit('backup', $backup_settings, $__audit_before);
             $message = "Backup settings saved successfully!";
             $message_type = "success";
         } catch (PDOException $e) {
@@ -309,8 +345,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     }
     
     elseif ($action === 'save_api') {
-        $api_settings = ['api_enabled', 'api_rate_limit', 'api_allowed_ips'];
-        
+        $api_settings = ['api_enabled', 'api_rate_limit', 'api_allowed_ips', 'api_key'];
+        $__audit_before = $settings_snapshot($api_settings);
         try {
             $pdo->beginTransaction();
             foreach ($api_settings as $key) {
@@ -332,7 +368,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $message_type = "success";
             
             $pdo->commit();
-            
+            $settings_audit('api', $api_settings, $__audit_before);
+
             // Refresh settings
             $stmt = $pdo->prepare("SELECT setting_key, setting_value FROM system_settings WHERE tenant_id = ? OR tenant_id IS NULL");
             $stmt->execute([$tenant_id]);
@@ -362,7 +399,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $limit_settings = [
             'max_file_size', 'allowed_file_types', 'max_containers_per_page', 'max_trips_per_page'
         ];
-        
+        $__audit_before = $settings_snapshot($limit_settings);
         try {
             $pdo->beginTransaction();
             foreach ($limit_settings as $key) {
@@ -370,6 +407,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 $updateSetting($key, $value);
             }
             $pdo->commit();
+            $settings_audit('limits', $limit_settings, $__audit_before);
             $message = "System limits saved successfully!";
             $message_type = "success";
         } catch (PDOException $e) {

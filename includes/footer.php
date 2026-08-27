@@ -30,6 +30,28 @@
 <script src="https://code.jquery.com/jquery-3.5.1.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/popper.js@1.16.1/dist/umd/popper.min.js"></script>
 <script src="https://stackpath.bootstrapcdn.com/bootstrap/4.5.2/js/bootstrap.min.js"></script>
+<script>
+// CSRF-token shim: every same-origin POST from this page gets the token
+// as an X-CSRF-Token header (works even when the AJAX call was written
+// without a token field). FormData bodies also receive an appended
+// csrf_token field so multipart uploads pass verification.
+(function () {
+    var m = document.querySelector('meta[name="csrf-token"]');
+    if (!m || !window.jQuery) return;
+    var token = m.getAttribute('content') || '';
+    jQuery.ajaxSetup({
+        beforeSend: function (xhr, settings) {
+            var method = (settings.type || 'GET').toUpperCase();
+            if (method === 'GET' || method === 'HEAD' || method === 'OPTIONS') return;
+            if (settings.crossDomain) return;
+            xhr.setRequestHeader('X-CSRF-Token', token);
+            if (settings.data instanceof FormData) {
+                if (!settings.data.has('csrf_token')) settings.data.append('csrf_token', token);
+            }
+        }
+    });
+})();
+</script>
 
 <script>
 // Mobile navigation

@@ -109,6 +109,8 @@ if (isset($_GET['action'])) {
 // Handle AJAX requests FIRST before any output
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['ajax_action'])) {
     header('Content-Type: application/json');
+    require_once __DIR__ . '/../includes/csrf.php';
+    require_csrf_token();
     
     $action = $_POST['ajax_action'];
     

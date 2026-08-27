@@ -200,6 +200,7 @@ if ($role === 'superadmin') {
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=yes">
+<?php require_once __DIR__ . '/csrf.php'; echo csrf_meta(); ?>
 <title><?= htmlspecialchars($system_name) ?> | <?= ucfirst(str_replace('.php', '', $currentPage)) ?></title>
 
 <link rel="icon" type="image/png" href="../assets/images/curdun-favicon.png">

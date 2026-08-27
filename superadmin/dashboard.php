@@ -698,7 +698,7 @@ include_once __DIR__ . '/../includes/header.php';
             <div class="stat-card">
                 <div class="stat-info">
                     <h3 class="financial-positive">$<?= number_format($stats['invoice_totals']['total'], 2) ?></h3>
-                    <p><i class="fas fa-dollar-sign"></i> Total Revenue</p>
+                    <p><i class="fas fa-dollar-sign"></i> Cross-Tenant Cargo Revenue</p>
                 </div>
                 <div class="stat-icon">
                     <i class="fas fa-chart-line"></i>
@@ -856,7 +856,7 @@ include_once __DIR__ . '/../includes/header.php';
             <div class="dashboard-card">
                 <div class="card-header">
                     <h3><i class="fas fa-box"></i> Recent Containers</h3>
-                    <a href="../containers/index.php" class="view-all-link">View All →</a>
+                    <a href="containers.php" class="view-all-link">View All →</a>
                 </div>
                 <div class="card-body">
                     <div class="table-responsive">
@@ -885,7 +885,7 @@ include_once __DIR__ . '/../includes/header.php';
             <div class="dashboard-card">
                 <div class="card-header">
                     <h3><i class="fas fa-shipping-fast"></i> Recent Shipments</h3>
-                    <a href="../shipments/index.php" class="view-all-link">View All →</a>
+                    <a href="tracking.php" class="view-all-link">View All →</a>
                 </div>
                 <div class="card-body">
                     <div class="table-responsive">
@@ -921,9 +921,9 @@ include_once __DIR__ . '/../includes/header.php';
                 </div>
                 <div class="card-body">
                     <div class="quick-actions">
-                        <a href="users/create.php" class="quick-action-btn"><i class="fas fa-user-plus"></i><span>Create New User</span><i class="fas fa-chevron-right"></i></a>
-                        <a href="tenants/create.php" class="quick-action-btn"><i class="fas fa-building"></i><span>Add New Tenant</span><i class="fas fa-chevron-right"></i></a>
-                        <a href="../reports/index.php" class="quick-action-btn"><i class="fas fa-chart-pie"></i><span>Generate Reports</span><i class="fas fa-chevron-right"></i></a>
+                        <a href="users.php?new=1" class="quick-action-btn"><i class="fas fa-user-plus"></i><span>Create New User</span><i class="fas fa-chevron-right"></i></a>
+                        <a href="tenants.php?new=1" class="quick-action-btn"><i class="fas fa-building"></i><span>Add New Tenant</span><i class="fas fa-chevron-right"></i></a>
+                        <a href="reports.php" class="quick-action-btn"><i class="fas fa-chart-pie"></i><span>Generate Reports</span><i class="fas fa-chevron-right"></i></a>
                         <a href="settings.php" class="quick-action-btn"><i class="fas fa-cog"></i><span>System Settings</span><i class="fas fa-chevron-right"></i></a>
                     </div>
                 </div>
@@ -939,7 +939,7 @@ include_once __DIR__ . '/../includes/header.php';
                     <ul class="status-list">
                         <li><span><i class="fas fa-code-branch"></i> System Version</span><span class="badge-info">v2.0</span></li>
                         <li><span><i class="fas fa-chart-line"></i> MTD Revenue</span><span class="financial-positive">$<?= number_format($stats['platform_monthly_revenue'], 2) ?></span></li>
-                        <li><span><i class="fas fa-chart-line"></i> Total Revenue (YTD)</span><span class="financial-positive">$<?= number_format($stats['invoice_totals']['total'] ?? 0, 2) ?></span></li>
+                        <li><span><i class="fas fa-chart-line"></i> Cross-Tenant Cargo Revenue (YTD)</span><span class="financial-positive">$<?= number_format($stats['invoice_totals']['total'] ?? 0, 2) ?></span></li>
                         <li><span><i class="fas fa-envelope"></i> PHP Version</span><span class="badge-info"><?= phpversion() ?></span></li>
                         <li><span><i class="fas fa-clock"></i> Server Time</span><span><?= date('Y-m-d H:i:s') ?></span></li>
                     </ul>

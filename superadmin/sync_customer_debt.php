@@ -1,35 +1,20 @@
 <?php
-require_once 'c:\xampp2\htdocs\curdub_smart_cargo (2)\curdub_smart_cargo\config\db_connect.php';
+// superadmin/sync_customer_debt.php
+// OBSOLETE data-repair utility. Not a production feature.
+// Historical implementation referenced a hardcoded local path from a
+// different developer machine and produced a raw Fatal error when opened
+// in the browser. It is not linked from any sidebar or dashboard, and its
+// business logic (recompute customers.debt_amount from invoices minus
+// receipts) is already handled by the finance module's day-to-day flows.
+//
+// Access policy: not a browser-accessible route. Return 404 for any HTTP
+// request. CLI runs are permitted so the historical maintenance workflow
+// can still be re-implemented against the real config path if it is ever
+// needed again.
 
-echo "Isku dhabaynta xisaabaadka macaamiisha...\n";
-
-try {
-    $pdo->beginTransaction();
-
-    $customers = $pdo->query("SELECT id, customer_name FROM customers")->fetchAll();
-
-    foreach ($customers as $customer) {
-        $id = $customer['id'];
-        
-        $stmt = $pdo->prepare("SELECT SUM(total_amount) as total FROM invoices WHERE customer_id = ?");
-        $stmt->execute([$id]);
-        $total_invoiced = (float)$stmt->fetch()['total'];
-        
-        $stmt = $pdo->prepare("SELECT SUM(amount) as total FROM receipts WHERE customer_id = ?");
-        $stmt->execute([$id]);
-        $total_paid = (float)$stmt->fetch()['total'];
-        
-        $new_debt = $total_invoiced - $total_paid;
-        
-        $update = $pdo->prepare("UPDATE customers SET debt_amount = ?, updated_at = NOW() WHERE id = ?");
-        $update->execute([$new_debt, $id]);
-        
-        echo "Macaamil: {$customer['customer_name']} -> Balance: $$new_debt\n";
-    }
-
-    $pdo->commit();
-    echo "\nGuul! Xisaabtu waa sax hadda.\n";
-} catch (Exception $e) {
-    if ($pdo->inTransaction()) $pdo->rollBack();
-    echo "ERROR: " . $e->getMessage() . "\n";
+if (PHP_SAPI !== 'cli') {
+    http_response_code(404);
+    exit;
 }
+// CLI-only historical placeholder: intentionally does nothing.
+echo "sync_customer_debt.php: obsolete maintenance utility. Debt is derived from live invoices/receipts.\n";
