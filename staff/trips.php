@@ -282,9 +282,19 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['ajax_action'])) {
     }
 
     if ($action === 'get_branch_containers') {
-        // Containers in this branch, without a trip yet, or with a pending trip
+        // Containers in this branch, with the authoritative used-CBM total
+        // derived from the cargo_manifest_items rows so the New Trip form can
+        // populate Total CBM from the actual loaded cargo (not the container's
+        // maximum capacity).
         $stmt = $pdo->prepare("
-            SELECT c.id, c.container_number, c.status
+            SELECT c.id, c.container_number, c.status,
+                   COALESCE((
+                       SELECT SUM(cmi.cbm_used)
+                       FROM cargo_manifest_items cmi
+                       WHERE cmi.container_id = c.id
+                         AND cmi.tenant_id = c.tenant_id
+                         AND cmi.master_shipment_id IS NOT NULL
+                   ), 0) AS used_cbm
             FROM containers c
             WHERE c.tenant_id = ? AND c.current_branch_id = ?
             ORDER BY c.created_at DESC
@@ -391,12 +401,21 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['ajax_action'])) {
         $driver_name = postString('driver_name');
         $driver_phone = postString('driver_phone');
         $truck_plate = postString('truck_plate');
-        $total_cbm = (float)str_replace(',', '.', postString('total_cbm', '0'));
         $notes = postString('notes');
 
-        $check = $pdo->prepare("SELECT id FROM trucking_trips WHERE id = ? AND tenant_id = ? AND (branch_id = ? OR from_branch_id = ? OR to_branch_id = ?) LIMIT 1");
+        $check = $pdo->prepare("SELECT id, container_id FROM trucking_trips WHERE id = ? AND tenant_id = ? AND (branch_id = ? OR from_branch_id = ? OR to_branch_id = ?) LIMIT 1");
         $check->execute([$id, $tenant_id, $assigned_branch_id, $assigned_branch_id, $assigned_branch_id]);
-        if (!$check->fetch(PDO::FETCH_ASSOC)) jsonOut(['success' => false, 'message' => 'Trip not found in your branch.']);
+        $existingTrip = $check->fetch(PDO::FETCH_ASSOC);
+        if (!$existingTrip) jsonOut(['success' => false, 'message' => 'Trip not found in your branch.']);
+
+        // Total CBM is derived from the container's authoritative manifest
+        // totals, not from the browser payload. A POSTed total_cbm is ignored.
+        require_once __DIR__ . '/../includes/shipment_functions.php';
+        $__cont = (int)($existingTrip['container_id'] ?? 0);
+        $__totals = $__cont > 0
+            ? container_manifest_totals($__cont, $tenant_id)
+            : ['used_cbm' => 0];
+        $total_cbm = (float)($__totals['used_cbm'] ?? 0);
 
         try {
             $stmt = $pdo->prepare("
@@ -598,8 +617,8 @@ require_once __DIR__ . '/../includes/header.php';
                         <input type="text" name="truck_plate" class="form-control">
                     </div>
                     <div class="form-group col-md-6">
-                        <label>Total CBM</label>
-                        <input type="number" step="0.01" min="0" name="total_cbm" class="form-control" value="0">
+                        <label>Total CBM <small class="text-muted">(auto from selected container manifest)</small></label>
+                        <input type="number" step="0.01" min="0" name="total_cbm" id="createTotalCbm" class="form-control" value="0" readonly>
                     </div>
                 </div>
                 <div class="form-group">
@@ -706,11 +725,22 @@ function loadContainerOptions() {
     $.post('', { ajax_action: 'get_branch_containers' }, function(res) {
         if (res.success) {
             let html = '<option value="">Select a container</option>';
-            res.containers.forEach(c => { html += `<option value="${c.id}">${$('<div>').text(c.container_number).html()} (${c.status})</option>`; });
+            res.containers.forEach(c => {
+                var used = Number(c.used_cbm || 0);
+                html += `<option value="${c.id}" data-used-cbm="${used.toFixed(4)}">${$('<div>').text(c.container_number).html()} (${c.status}, ${used.toFixed(2)} CBM)</option>`;
+            });
             $('#containerSelect').html(html);
+            $('#createTotalCbm').val('0.00');
         }
     }, 'json');
 }
+// Populate Total CBM from the authoritative used_cbm of the selected container.
+// Container capacity (size_cbm) is intentionally NOT used here -- the trip
+// carries the actual loaded cargo CBM, not the container's maximum capacity.
+$(document).on('change', '#containerSelect', function() {
+    var used = parseFloat($(this).find(':selected').data('used-cbm')) || 0;
+    $('#createTotalCbm').val(used.toFixed(2));
+});
 
 let searchTimer = null;
 $(document).on('keyup', '#searchInput', function() { clearTimeout(searchTimer); searchTimer = setTimeout(() => loadTrips(1), 350); });
