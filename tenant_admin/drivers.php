@@ -23,6 +23,13 @@ if (!$session_tenant_id) {
 
 require_once __DIR__ . '/../config/db_connect.php';
 
+// CSRF: every POST to this handler must carry a valid session token.
+if ($_SERVER['REQUEST_METHOD'] === 'POST') {
+    require_once __DIR__ . '/../includes/csrf.php';
+    require_csrf_token();
+}
+
+
 $user_id = $_SESSION['user_id'];
 $user_name = $_SESSION['user_name'] ?? 'Tenant Admin';
 

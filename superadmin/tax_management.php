@@ -173,6 +173,8 @@ if ($role === 'company_admin') {
 
 // ==================== AJAX HANDLERS ====================
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['ajax_action'])) {
+    require_once __DIR__ . '/../includes/csrf.php';
+    require_csrf_token();
     header('Content-Type: application/json');
     $action = $_POST['ajax_action'];
     

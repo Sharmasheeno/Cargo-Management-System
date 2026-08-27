@@ -77,6 +77,8 @@ if (!function_exists('users_admin_apply_role_conversion')) {
 
 // Handle AJAX requests FIRST before any output
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['ajax_action'])) {
+    require_once __DIR__ . '/../includes/csrf.php';
+    require_csrf_token();
     header('Content-Type: application/json');
     
     $action = $_POST['ajax_action'];

@@ -828,7 +828,7 @@ include_once __DIR__ . '/../includes/header.php';
             <div class="dashboard-card">
                 <div class="card-header">
                     <h3><i class="fas fa-chart-pie"></i> Containers by Status</h3>
-                    <a href="../containers/index.php" class="view-all-link">View All →</a>
+                    <a href="containers.php" class="view-all-link">View All →</a>
                 </div>
                 <div class="card-body">
                     <?php if (!empty($stats['containers_by_status'])): ?>
@@ -853,7 +853,7 @@ include_once __DIR__ . '/../includes/header.php';
             <div class="dashboard-card">
                 <div class="card-header">
                     <h3><i class="fas fa-chart-line"></i> Financial Summary</h3>
-                    <a href="../invoices/index.php" class="view-all-link">View All →</a>
+                    <a href="invoices.php" class="view-all-link">View All →</a>
                 </div>
                 <div class="card-body">
                     <ul class="status-list">
@@ -890,7 +890,7 @@ include_once __DIR__ . '/../includes/header.php';
             <div class="dashboard-card">
                 <div class="card-header">
                     <h3><i class="fas fa-user-friends"></i> Recent Customers</h3>
-                    <a href="../customers/index.php" class="view-all-link">View All →</a>
+                    <a href="customers.php" class="view-all-link">View All →</a>
                 </div>
                 <div class="card-body">
                     <div class="table-responsive">
@@ -923,7 +923,7 @@ include_once __DIR__ . '/../includes/header.php';
             <div class="dashboard-card">
                 <div class="card-header">
                     <h3><i class="fas fa-file-invoice-dollar"></i> Recent Invoices</h3>
-                    <a href="../invoices/index.php" class="view-all-link">View All →</a>
+                    <a href="invoices.php" class="view-all-link">View All →</a>
                 </div>
                 <div class="card-body">
                     <div class="table-responsive">
@@ -958,7 +958,7 @@ include_once __DIR__ . '/../includes/header.php';
             <div class="dashboard-card">
                 <div class="card-header">
                     <h3><i class="fas fa-box"></i> Recent Containers</h3>
-                    <a href="../containers/index.php" class="view-all-link">View All →</a>
+                    <a href="containers.php" class="view-all-link">View All →</a>
                 </div>
                 <div class="card-body">
                     <div class="table-responsive">
@@ -994,7 +994,7 @@ include_once __DIR__ . '/../includes/header.php';
             <div class="dashboard-card">
                 <div class="card-header">
                     <h3><i class="fas fa-shipping-fast"></i> Recent Shipments</h3>
-                    <a href="../shipments/index.php" class="view-all-link">View All →</a>
+                    <a href="tracking.php" class="view-all-link">View All →</a>
                 </div>
                 <div class="card-body">
                     <div class="table-responsive">
@@ -1029,7 +1029,7 @@ include_once __DIR__ . '/../includes/header.php';
             <div class="dashboard-card">
                 <div class="card-header">
                     <h3><i class="fas fa-exchange-alt"></i> Recent Stock Movements</h3>
-                    <a href="../warehouse/movements.php" class="view-all-link">View All →</a>
+                    <a href="warehouse_stock.php" class="view-all-link">View All →</a>
                 </div>
                 <div class="card-body">
                     <div class="table-responsive">
@@ -1072,7 +1072,7 @@ include_once __DIR__ . '/../includes/header.php';
                         <a href="containers.php" class="quick-action-btn"><i class="fas fa-box"></i><span>Register Container</span><i class="fas fa-chevron-right"></i></a>
                         <a href="shipments.php" class="quick-action-btn"><i class="fas fa-shipping-fast"></i><span>Create Shipment</span><i class="fas fa-chevron-right"></i></a>
                         <a href="invoices.php" class="quick-action-btn"><i class="fas fa-file-invoice"></i><span>Generate Invoice</span><i class="fas fa-chevron-right"></i></a>
-                        <a href="warehouse.php" class="quick-action-btn"><i class="fas fa-warehouse"></i><span>Add Stock Item</span><i class="fas fa-chevron-right"></i></a>
+                        <a href="warehouse_stock.php" class="quick-action-btn"><i class="fas fa-warehouse"></i><span>Add Stock Item</span><i class="fas fa-chevron-right"></i></a>
                         <a href="reports.php" class="quick-action-btn"><i class="fas fa-chart-pie"></i><span>Generate Reports</span><i class="fas fa-chevron-right"></i></a>
                     </div>
                 </div>

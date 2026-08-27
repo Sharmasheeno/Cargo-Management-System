@@ -301,6 +301,8 @@ $message = '';
 $message_type = '';
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
+    require_once __DIR__ . '/../includes/csrf.php';
+    require_csrf_token();
     require_once __DIR__ . '/../includes/admin_audit.php';
     $action = $_POST['action'] ?? '';
 

@@ -38,6 +38,13 @@ if ($session_tenant_id <= 0 && !in_array($_SESSION['role'] ?? '', ['superadmin',
 // Ku dar xiriiriyaha database-ka
 require_once __DIR__ . '/../config/db_connect.php';
 
+// CSRF: every POST to this handler must carry a valid session token.
+if ($_SERVER['REQUEST_METHOD'] === 'POST') {
+    require_once __DIR__ . '/../includes/csrf.php';
+    require_csrf_token();
+}
+
+
 //==============================================================
 // HAWLWADE CAWEEYA (HELPERS)
 //==============================================================

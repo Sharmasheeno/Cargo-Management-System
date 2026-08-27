@@ -193,6 +193,8 @@ $error = '';
 
 // Handle redemption actions (accept/decline)
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
+    require_once __DIR__ . '/../includes/csrf.php';
+    require_csrf_token();
     try {
         // Update loyalty settings
         if (isset($_POST['update_settings'])) {

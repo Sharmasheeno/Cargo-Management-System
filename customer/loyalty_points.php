@@ -13,6 +13,13 @@ if (!isset($_SESSION['user_id'])) {
 
 require_once __DIR__ . '/../config/db_connect.php';
 
+// CSRF: every POST to this handler must carry a valid session token.
+if ($_SERVER['REQUEST_METHOD'] === 'POST') {
+    require_once __DIR__ . '/../includes/csrf.php';
+    require_csrf_token();
+}
+
+
 $user_id = (int)($_SESSION['user_id'] ?? 0);
 $user_name = $_SESSION['user_name'] ?? 'Customer';
 $user_role = $_SESSION['role'] ?? ($_SESSION['role_type'] ?? '');

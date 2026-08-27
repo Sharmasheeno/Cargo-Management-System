@@ -16,6 +16,13 @@ $role = $_SESSION['role'];
 $session_tenant_id = $_SESSION['tenant_id'] ?? 0;
 
 require_once __DIR__ . '/../config/db_connect.php';
+
+// CSRF: every POST to this handler must carry a valid session token.
+if ($_SERVER['REQUEST_METHOD'] === 'POST') {
+    require_once __DIR__ . '/../includes/csrf.php';
+    require_csrf_token();
+}
+
 require_once __DIR__ . '/../includes/MessagingService.php';
 $messaging = new MessagingService($pdo);
 

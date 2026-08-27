@@ -1245,6 +1245,8 @@ function importReceiptsFromCSV(PDO $pdo, int $tenant_id, int $user_id, array $fi
 }
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['ajax_action'])) {
+    require_once __DIR__ . '/../includes/csrf.php';
+    require_csrf_token();
     $action = $_POST['ajax_action'];
 
     try {

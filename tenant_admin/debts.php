@@ -20,6 +20,13 @@ if ($session_tenant_id <= 0) {
 
 require_once __DIR__ . '/../config/db_connect.php';
 
+// CSRF: every POST to this handler must carry a valid session token.
+if ($_SERVER['REQUEST_METHOD'] === 'POST') {
+    require_once __DIR__ . '/../includes/csrf.php';
+    require_csrf_token();
+}
+
+
 $messaging = null;
 $messagingFile = __DIR__ . '/../includes/MessagingService.php';
 if (file_exists($messagingFile)) {

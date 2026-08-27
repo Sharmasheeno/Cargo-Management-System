@@ -25,6 +25,13 @@ if (!in_array($role, ['superadmin', 'company_admin'])) {
 }
 
 require_once __DIR__ . '/../config/db_connect.php';
+
+// CSRF: every POST to this handler must carry a valid session token.
+if ($_SERVER['REQUEST_METHOD'] === 'POST') {
+    require_once __DIR__ . '/../includes/csrf.php';
+    require_csrf_token();
+}
+
 require_once __DIR__ . '/../includes/functions.php';
 
 // Helper function for safe query execution

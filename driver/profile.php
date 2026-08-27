@@ -64,6 +64,8 @@ $error  = null;
 // slip role/tenant/branch/status/ownership into the request).
 // ----------------------------------------------------------------------------
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
+    require_once __DIR__ . '/../includes/csrf.php';
+    require_csrf_token();
     $action = postStr('action');
     try {
         if ($action === 'update_phone') {

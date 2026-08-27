@@ -708,6 +708,8 @@ if (isset($_GET['action'])) {
 
 // Handle AJAX requests
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['ajax_action'])) {
+    require_once __DIR__ . '/../includes/csrf.php';
+    require_csrf_token();
     // Ensure clean JSON output without PHP warnings breaking AJAX
     if (ob_get_length()) {
         ob_clean();

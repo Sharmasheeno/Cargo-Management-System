@@ -12,6 +12,13 @@ if (session_status() === PHP_SESSION_NONE) {
 
 require_once __DIR__ . '/../config/db_connect.php';
 
+// CSRF: every POST to this handler must carry a valid session token.
+if ($_SERVER['REQUEST_METHOD'] === 'POST') {
+    require_once __DIR__ . '/../includes/csrf.php';
+    require_csrf_token();
+}
+
+
 if (!isset($pdo) || !$pdo instanceof PDO) {
     die('Database connection failed: $pdo not found. Check config/db_connect.php');
 }

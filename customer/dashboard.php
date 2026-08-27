@@ -927,7 +927,7 @@ include_once __DIR__ . '/../includes/header.php';
                         <a href="payments.php" class="quick-action-btn"><i class="fas fa-credit-card"></i><span>Make a Payment</span><i class="fas fa-chevron-right"></i></a>
                         <a href="tracking.php" class="quick-action-btn"><i class="fas fa-map-marker-alt"></i><span>Track My Shipments</span><i class="fas fa-chevron-right"></i></a>
                         <a href="warehouse_stock.php" class="quick-action-btn"><i class="fas fa-warehouse"></i><span>My Warehouse Stock</span><i class="fas fa-chevron-right"></i></a>
-                        <a href="profile.php" class="quick-action-btn"><i class="fas fa-user-edit"></i><span>Update Profile</span><i class="fas fa-chevron-right"></i></a>
+                        <a href="support.php" class="quick-action-btn"><i class="fas fa-life-ring"></i><span>Support</span><i class="fas fa-chevron-right"></i></a>
                     </div>
                 </div>
             </div>
@@ -960,7 +960,7 @@ include_once __DIR__ . '/../includes/header.php';
                                                 <?php if ($invoice['status'] != 'paid'): ?>
                                                     <a href="make_payment.php?invoice_id=<?= $invoice['id'] ?>" class="btn btn-sm" style="background: #0F7A3A; color: white; padding: 4px 12px; border-radius: 20px; text-decoration: none; font-size: 11px;">Pay Now</a>
                                                 <?php else: ?>
-                                                    <a href="view_invoice.php?id=<?= $invoice['id'] ?>" class="btn btn-sm" style="background: #2D1859; color: white; padding: 4px 12px; border-radius: 20px; text-decoration: none; font-size: 11px;">View</a>
+                                                    <a href="invoices.php?id=<?= $invoice['id'] ?>" class="btn btn-sm" style="background: #2D1859; color: white; padding: 4px 12px; border-radius: 20px; text-decoration: none; font-size: 11px;">View</a>
                                                 <?php endif; ?>
                                             </td>
                                         </tr>

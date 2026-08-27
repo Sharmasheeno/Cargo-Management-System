@@ -164,6 +164,8 @@ $message = '';
 $error = '';
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
+    require_once __DIR__ . '/../includes/csrf.php';
+    require_csrf_token();
     try {
         if (isset($_POST['update_settings'])) {
             $tenant_id = (int)($_POST['tenant_id'] ?? 0);

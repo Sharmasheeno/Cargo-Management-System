@@ -159,6 +159,8 @@ function createBranchManagerUser($pdo, $tenant_id, $branch_id, $manager_name, $m
 
 // Handle AJAX requests
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['ajax_action'])) {
+    require_once __DIR__ . '/../includes/csrf.php';
+    require_csrf_token();
     header('Content-Type: application/json');
     
     $action = $_POST['ajax_action'];
@@ -481,7 +483,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['ajax_action'])) {
                     $tenant_id);
                 echo json_encode(['success' => true, 'message' => $message, 'user_result' => $user_result]);
             } else {
-                // Verify branch belongs to this tenant. Fetch row for audit before/after.
+                // Verify branch belongs to this tenant. Fetch full row for audit before/after.
                 $check = $pdo->prepare("SELECT id, branch_code, branch_name, branch_type, status, address, phone, email, manager_name FROM branches WHERE id = ? AND tenant_id = ?");
                 $check->execute([(int)$id, $tenant_id]);
                 $existing_branch = $check->fetch(PDO::FETCH_ASSOC);

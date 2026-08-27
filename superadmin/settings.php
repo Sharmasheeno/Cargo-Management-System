@@ -179,11 +179,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     // Snapshot the current value of every setting key so before/after audit
     // deltas can be recorded per action. Sensitive keys are masked by
     // admin_audit_mask_sensitive() before the audit row is written.
-    $settings_snapshot = function(array $keys) use ($pdo, $tenant_id): array {
+    $settings_snapshot = function(array $keys) use ($pdo): array {
         if (empty($keys)) return [];
         $in = implode(',', array_fill(0, count($keys), '?'));
-        $stmt = $pdo->prepare("SELECT setting_key, setting_value FROM system_settings WHERE (tenant_id = ? OR tenant_id IS NULL) AND setting_key IN ($in)");
-        $stmt->execute(array_merge([$tenant_id], $keys));
+        // Super Admin platform settings live at tenant_id IS NULL.
+        $stmt = $pdo->prepare("SELECT setting_key, setting_value FROM system_settings WHERE tenant_id IS NULL AND setting_key IN ($in)");
+        $stmt->execute($keys);
         $out = [];
         foreach ($keys as $k) { $out[$k] = null; }
         foreach ($stmt->fetchAll(PDO::FETCH_ASSOC) as $row) {
@@ -205,16 +206,22 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     };
 
     // Helper function to update settings
-    $updateSetting = function($key, $value) use ($pdo, $tenant_id, $user_id) {
+    // Super Admin platform settings ALWAYS land in the platform-scope row
+    // (tenant_id IS NULL). The `system_settings.setting_key` column is
+    // GLOBALLY unique, so there is exactly one row per key. When SA writes,
+    // force the row's tenant_id back to NULL so a prior tenant write cannot
+    // hijack a platform setting into per-tenant scope.
+    $updateSetting = function($key, $value) use ($pdo, $user_id) {
         $stmt = $pdo->prepare("
             INSERT INTO system_settings (tenant_id, setting_key, setting_value, updated_by)
-            VALUES (?, ?, ?, ?)
+            VALUES (NULL, ?, ?, ?)
             ON DUPLICATE KEY UPDATE
+                tenant_id = NULL,
                 setting_value = VALUES(setting_value),
                 updated_by = VALUES(updated_by),
                 updated_at = CURRENT_TIMESTAMP
         ");
-        return $stmt->execute([$tenant_id, $key, $value, $user_id]);
+        return $stmt->execute([$key, $value, $user_id]);
     };
     
     if ($action === 'save_general') {
