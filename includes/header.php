@@ -798,18 +798,31 @@ body.sidebar-collapsed .main-content {
       </li>
 
       <li>
+        <!-- SA Finance grouped into six understandable domains.
+             Every legacy route still resolves; the menu labels group them
+             conceptually so operators don't hit ten flat finance links. -->
         <div class="menu-toggle" data-target="financeMenu"><span><i class="fa-solid fa-wallet"></i> Finance</span><i class="fa-solid fa-chevron-right"></i></div>
         <ul class="submenu" id="financeMenu">
-          <li><a href="../superadmin/accounting.php"><i class="fa-solid fa-university"></i> Accounting</a></li>
-          <li><a href="../superadmin/receipt_management.php"><i class="fa-solid fa-hand-holding-dollar"></i> Lacag Qabashada</a></li>
-          <li><a href="../superadmin/expenses_management.php"><i class="fa-solid fa-receipt"></i> Expenses & Bills</a></li>
-          <li><a href="../superadmin/bank_reconciliation.php"><i class="fa-solid fa-balance-scale"></i> Bank Reconciliation</a></li>
-          <li><a href="../superadmin/tax_management.php"><i class="fa-solid fa-percent"></i> Tax Management</a></li>
-          <li><a href="../superadmin/invoices.php"><i class="fa-solid fa-file-invoice-dollar"></i> Invoices</a></li>
-          <li><a href="../superadmin/customers.php"><i class="fa-solid fa-users"></i> Customers</a></li>
-          <li><a href="../superadmin/payments.php"><i class="fa-solid fa-credit-card"></i> Payments</a></li>
-          <li><a href="../superadmin/loyalty_points.php"><i class="fa-solid fa-users"></i> Loyalty Points</a></li>
+          <li class="menu-section-label" style="padding: 6px 20px 2px; font-size: 11px; font-weight: 700; color: rgba(255,255,255,.55); text-transform: uppercase; letter-spacing: .5px;">Overview</li>
+          <li><a href="../superadmin/financial_statements.php"><i class="fa-solid fa-chart-line"></i> Financial Overview</a></li>
 
+          <li class="menu-section-label" style="padding: 6px 20px 2px; font-size: 11px; font-weight: 700; color: rgba(255,255,255,.55); text-transform: uppercase; letter-spacing: .5px;">Sales &amp; Receivables</li>
+          <li><a href="../superadmin/invoices.php"><i class="fa-solid fa-file-invoice-dollar"></i> Invoices</a></li>
+          <li><a href="../superadmin/payments.php"><i class="fa-solid fa-credit-card"></i> Payments &amp; Receipts</a></li>
+          <li><a href="../superadmin/customers.php"><i class="fa-solid fa-users"></i> Customers</a></li>
+
+          <li class="menu-section-label" style="padding: 6px 20px 2px; font-size: 11px; font-weight: 700; color: rgba(255,255,255,.55); text-transform: uppercase; letter-spacing: .5px;">Expenses &amp; Payables</li>
+          <li><a href="../superadmin/expenses_management.php"><i class="fa-solid fa-receipt"></i> Expenses &amp; Bills</a></li>
+
+          <li class="menu-section-label" style="padding: 6px 20px 2px; font-size: 11px; font-weight: 700; color: rgba(255,255,255,.55); text-transform: uppercase; letter-spacing: .5px;">Banking</li>
+          <li><a href="../superadmin/bank_reconciliation.php"><i class="fa-solid fa-balance-scale"></i> Bank Reconciliation</a></li>
+
+          <li class="menu-section-label" style="padding: 6px 20px 2px; font-size: 11px; font-weight: 700; color: rgba(255,255,255,.55); text-transform: uppercase; letter-spacing: .5px;">Accounting</li>
+          <li><a href="../superadmin/accounting.php"><i class="fa-solid fa-university"></i> Chart / Journal</a></li>
+          <li><a href="../superadmin/tax_management.php"><i class="fa-solid fa-percent"></i> Tax</a></li>
+
+          <li class="menu-section-label" style="padding: 6px 20px 2px; font-size: 11px; font-weight: 700; color: rgba(255,255,255,.55); text-transform: uppercase; letter-spacing: .5px;">Reports</li>
+          <li><a href="../superadmin/reports.php"><i class="fa-solid fa-chart-pie"></i> Reports</a></li>
         </ul>
       </li>
 
@@ -822,10 +835,10 @@ body.sidebar-collapsed .main-content {
           <li><a href="../superadmin/branches.php"><i class="fas fa-code-branch"></i> Branches</a></li>
           <li><a href="../superadmin/branch_assignments.php"><i class="fas fa-user-check"></i> Branch Assignments</a></li>
           <li><a href="../superadmin/roles.php"><i class="fa-solid fa-user-tag"></i> Roles</a></li>
+          <li><a href="../superadmin/loyalty_points.php"><i class="fa-solid fa-star"></i> Loyalty Program</a></li>
         </ul>
       </li>
-      
-      <li><a href="../superadmin/reports.php"><i class="fa-solid fa-chart-pie"></i><span>Reports</span></a></li>
+
       <li><a href="../superadmin/settings.php"><i class="fa-solid fa-gear"></i><span>Settings</span></a></li>
 
     <?php elseif ($role === 'tenant_admin'): ?>
@@ -917,11 +930,16 @@ body.sidebar-collapsed .main-content {
       </li>
 
       <li>
+        <!-- Branch Manager Finance = MONITOR / REVIEW / APPROVE.
+             Overview shows branch-scoped KPIs. Approvals lists items
+             awaiting Branch Manager sign-off. Detail pages remain
+             accessible so existing bookmarks keep working. -->
         <div class="menu-toggle" data-target="financeMenu"><span><i class="fa-solid fa-wallet"></i> Finance</span><i class="fa-solid fa-chevron-right"></i></div>
         <ul class="submenu" id="financeMenu">
-          <li><a href="../branch_manager/expenses.php"><i class="fa-solid fa-receipt"></i> Expenses</a></li>
+          <li><a href="../branch_manager/branch_report.php"><i class="fa-solid fa-chart-simple"></i> Overview</a></li>
+          <li><a href="../branch_manager/expenses.php"><i class="fa-solid fa-thumbs-up"></i> Approvals</a></li>
           <li><a href="../branch_manager/invoices.php"><i class="fa-solid fa-file-invoice-dollar"></i> Invoices</a></li>
-          <li><a href="../branch_manager/receipts.php"><i class="fa-solid fa-hand-holding-dollar"></i> Receipts</a></li>
+          <li><a href="../branch_manager/receipts.php"><i class="fa-solid fa-hand-holding-dollar"></i> Payments &amp; Receipts</a></li>
         </ul>
       </li>
 
@@ -989,10 +1007,13 @@ body.sidebar-collapsed .main-content {
       <?php endif; ?>
       
       <?php if ($role_type === 'finance_manager'): ?>
+        <!-- Finance Manager: DAILY BRANCH FINANCE. Receipts are documents
+             emitted by Payments and are viewable from each payment row on
+             the Payments page — not a separate sidebar entry. Customer
+             finance history opens from a customer row on Customers. -->
         <li><a href="../staff/invoices.php"><i class="fa-solid fa-file-invoice-dollar"></i><span>Invoices</span></a></li>
         <li><a href="../staff/payments.php"><i class="fa-solid fa-credit-card"></i><span>Payments</span></a></li>
-        <li><a href="../staff/receipts.php"><i class="fa-solid fa-hand-holding-dollar"></i><span>Receipts</span></a></li>
-        <li><a href="../staff/customer_financial_history.php"><i class="fa-solid fa-users"></i><span>Customer Finance</span></a></li>
+        <li><a href="../staff/customer_financial_history.php"><i class="fa-solid fa-users"></i><span>Customers</span></a></li>
         <li><a href="../staff/expenses.php"><i class="fa-solid fa-receipt"></i><span>Expenses</span></a></li>
       <?php endif; ?>
 

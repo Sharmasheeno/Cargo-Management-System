@@ -798,6 +798,13 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['ajax_action'])) {
                 
                 $tenant_id = $pdo->lastInsertId();
 
+                // Provision the required control accounts on the new
+                // tenant's chart of accounts. Idempotent; runs inside the
+                // same transaction so a rolled-back tenant never leaves
+                // orphan CoA rows.
+                require_once __DIR__ . '/../includes/tenant_chart_of_accounts.php';
+                provisionTenantChartOfAccounts($pdo, (int)$tenant_id);
+
                 // Secure temporary-password provisioning (replaces legacy fixed '123').
                 require_once __DIR__ . '/../includes/admin_audit.php';
                 $__sa_alphabet = 'ABCDEFGHIJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789';
@@ -1286,7 +1293,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['ajax_action'])) {
                 $stmt->execute([$name, $code, $email, $phone, $address, $cycle, $start_date, $end_date, $custom_login_link ?: null, $user_id]);
                 
                 $tenant_id = $pdo->lastInsertId();
-                
+
+                // Bulk-import path also needs the control-account seed.
+                require_once __DIR__ . '/../includes/tenant_chart_of_accounts.php';
+                provisionTenantChartOfAccounts($pdo, (int)$tenant_id);
+
                 if (!empty($admin_name) && !empty($admin_email)) {
                     // Secure temporary-password provisioning (replaces legacy fixed '123').
                     $__sa_alphabet = 'ABCDEFGHIJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789';

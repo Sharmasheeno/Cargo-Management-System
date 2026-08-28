@@ -38,6 +38,14 @@ if (!in_array($current_role_type, staffFinanceRoleTypes(), true)) {
 
 require_once __DIR__ . '/../config/db_connect.php';
 
+// Load the double-entry AccountingService so createReceipt() below can
+// emit a balanced Dr Cash / Cr Accounts Receivable journal entry for the
+// Finance Manager payment path. Without it, receipts on this page were
+// posted with no general-ledger effect.
+if (file_exists(__DIR__ . '/../includes/AccountingService.php')) {
+    require_once __DIR__ . '/../includes/AccountingService.php';
+}
+
 $user_id = (int)$_SESSION['user_id'];
 $tenant_id = (int)($_SESSION['tenant_id'] ?? 0);
 
@@ -398,8 +406,24 @@ function createReceipt(PDO $pdo, int $tenant_id, int $user_id, int $branch_id, a
             ->execute([$newPaid, $newStatus, $data['invoice_id'], $tenant_id]);
 
         $points = awardReceiptPoints($pdo, $receipt_id, $tenant_id, $loyalty_rate, $branch_id);
+
+        // General-ledger effect for the payment: Dr Cash / Cr Accounts
+        // Receivable. Posted inside the same transaction so a rolled-back
+        // receipt never leaves a ghost journal entry. postToLedger uses
+        // the existing open transaction rather than starting a new one
+        // (AccountingService::postToLedger checks pdo->inTransaction).
+        if (class_exists('AccountingService')) {
+            try {
+                $acc = new AccountingService($pdo, $tenant_id, $user_id);
+                $acc->journalizeReceipt($receipt_id);
+            } catch (Throwable $ledger_e) {
+                error_log('[staff/receipts createReceipt journalizeReceipt] ' . $ledger_e->getMessage());
+                throw new Exception('Payment cannot be recorded: general-ledger posting failed.');
+            }
+        }
+
         $pdo->commit();
-        return ['success' => true, 'message' => 'Receipt created. Points: ' . points2($points['points']), 'receipt_id' => $receipt_id, 'receipt_number' => $receipt_number];
+        return ['success' => true, 'message' => 'Payment recorded successfully. Receipt: ' . $receipt_number . ' (loyalty earned: ' . points2($points['points']) . ')', 'receipt_id' => $receipt_id, 'receipt_number' => $receipt_number];
     } catch (Throwable $e) {
         if ($pdo->inTransaction()) $pdo->rollBack();
         throw $e;
@@ -503,19 +527,19 @@ function renderTotalsHTML(array $totals): string {
     return '
     <div class="totals-grid" style="display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 15px; margin-bottom: 20px;">
         <div class="total-card" style="background: linear-gradient(135deg, #2D1859, #4B2C85); color: white; border-radius: 14px; padding: 15px 20px; text-align: center;">
-            <div style="font-size: 14px; opacity: 0.9;"><i class="fas fa-receipt"></i> Total Receipts</div>
+            <div style="font-size: 14px; opacity: 0.9;"><i class="fas fa-credit-card"></i> Recorded Payments</div>
             <div style="font-size: 28px; font-weight: 800;">' . number_format($totals['total_receipts'], 0) . '</div>
         </div>
         <div class="total-card" style="background: linear-gradient(135deg, #10B981, #059669); color: white; border-radius: 14px; padding: 15px 20px; text-align: center;">
-            <div style="font-size: 14px; opacity: 0.9;"><i class="fas fa-dollar-sign"></i> Total Amount</div>
+            <div style="font-size: 14px; opacity: 0.9;"><i class="fas fa-dollar-sign"></i> Total Collected</div>
             <div style="font-size: 28px; font-weight: 800;">$' . money2($totals['total_amount_received']) . '</div>
         </div>
         <div class="total-card" style="background: linear-gradient(135deg, #F59E0B, #D97706); color: white; border-radius: 14px; padding: 15px 20px; text-align: center;">
-            <div style="font-size: 14px; opacity: 0.9;"><i class="fas fa-star"></i> Points Earned</div>
+            <div style="font-size: 14px; opacity: 0.9;"><i class="fas fa-star"></i> Loyalty Earned</div>
             <div style="font-size: 28px; font-weight: 800;">' . points2($totals['total_points_earned']) . '</div>
         </div>
         <div class="total-card" style="background: linear-gradient(135deg, #EF4444, #DC2626); color: white; border-radius: 14px; padding: 15px 20px; text-align: center;">
-            <div style="font-size: 14px; opacity: 0.9;"><i class="fas fa-coins"></i> Points Used</div>
+            <div style="font-size: 14px; opacity: 0.9;"><i class="fas fa-coins"></i> Loyalty Used</div>
             <div style="font-size: 28px; font-weight: 800;">' . points2($totals['total_points_used']) . '</div>
         </div>
     </div>';
@@ -596,18 +620,25 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['ajax_action'])) {
             json_response($created);
         }
 
+        // A posted customer payment is a financial event. Editing it in
+        // place would silently overwrite the original amount / method /
+        // reference with no auditable history, and deleting it hard-
+        // removes the receipt row without a reversal record. Both paths
+        // exist in this file's helpers but must not be reachable from the
+        // Finance Manager UI. Refuse them at the handler boundary so a
+        // direct HTTP call also fails.
         if ($action === 'update_receipt') {
-            $receipt_id = (int)($_POST['receipt_id'] ?? 0);
-            if ($receipt_id <= 0) throw new Exception('Receipt ID missing');
-            $data = validateReceiptInput($_POST, $pdo, $tenant_id, $receipt_id, $tenant_point_money_value, $assigned_branch_id);
-            $updated = updateReceipt($pdo, $tenant_id, $user_id, $assigned_branch_id, $receipt_id, $data, $tenant_loyalty_rate);
-            json_response($updated);
+            json_response([
+                'success' => false,
+                'message' => 'Recorded payments cannot be edited. Contact your Super Admin to record a correction.',
+            ]);
         }
 
         if ($action === 'delete_receipt') {
-            $receipt_id = (int)($_POST['receipt_id'] ?? 0);
-            if ($receipt_id <= 0) throw new Exception('Receipt ID missing');
-            json_response(deleteReceipt($pdo, $tenant_id, $assigned_branch_id, $receipt_id));
+            json_response([
+                'success' => false,
+                'message' => 'Recorded payments cannot be deleted. Contact your Super Admin to record a correction.',
+            ]);
         }
 
         if ($action === 'get_receipt_data') {
@@ -655,7 +686,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['ajax_action'])) {
             <div class="table-responsive">
                 <table class="table table-bordered table-hover receipt-table">
                     <thead>
-                        <tr><th>ID</th><th>Receipt #</th><th>Date</th><th>Customer</th><th>Original</th><th>Discount</th><th>Final</th><th>Points Used</th><th>Points Earned</th><th>Method</th><th>Account</th><th>Actions</th></tr>
+                        <tr><th>ID</th><th>Receipt&nbsp;#</th><th>Date</th><th>Customer</th><th>Original</th><th>Discount</th><th>Amount Paid</th><th>Points Used</th><th>Points Earned</th><th>Method</th><th>Account</th><th>Actions</th></tr>
                     </thead>
                     <tbody>
                     <?php if ($receipts): foreach ($receipts as $r): ?>
@@ -671,10 +702,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['ajax_action'])) {
                             <td class="text-center"><span class="badge badge-success"><?= points2($r['points_earned']) ?></span></td>
                             <td><?= h(ucfirst(str_replace('_', ' ', $r['payment_method'] ?? 'cash'))) ?></td>
                             <td class="text-center"><?php if ($r['payment_method'] === 'bank_transfer' && !empty($r['bank_name'])): ?><small><?= h($r['bank_name']) ?></small><?php else: ?>-<?php endif; ?></td>
-                            <td class="action-buttons"><button class="btn btn-sm btn-info view-receipt" data-id="<?= (int)$r['id'] ?>">View</button><button class="btn btn-sm btn-warning edit-receipt" data-id="<?= (int)$r['id'] ?>">Edit</button><button class="btn btn-sm btn-danger delete-receipt" data-id="<?= (int)$r['id'] ?>">Delete</button></td>
+                            <td class="action-buttons"><button class="btn btn-sm btn-info view-receipt" data-id="<?= (int)$r['id'] ?>" title="View this payment and its receipt">View</button></td>
                         </tr>
                     <?php endforeach; else: ?>
-                        <tr><td colspan="12" class="text-center p-4">No receipts found</td></tr>
+                        <tr><td colspan="12" class="text-center p-4">No payments found</td></tr>
                     <?php endif; ?>
                     </tbody>
                 </table>
@@ -697,7 +728,7 @@ require_once __DIR__ . '/../includes/header.php';
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <title>Receipts - <?= h($branch_name) ?></title>
+    <title>Payments - <?= h($branch_name) ?></title>
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
     <link rel="stylesheet" href="https://stackpath.bootstrapcdn.com/bootstrap/4.5.2/css/bootstrap.min.css">
@@ -740,17 +771,17 @@ require_once __DIR__ . '/../includes/header.php';
 <body>
 <div class="page-wrap">
     <div class="page-header-custom">
-        <div><h1><i class="fas fa-hand-holding-dollar"></i> Receipts</h1><small class="text-muted"><?= h($branch_name) ?> - Payment &amp; Receipt Management with Loyalty Points</small></div>
+        <div><h1><i class="fas fa-credit-card"></i> Payments</h1><small class="text-muted"><?= h($branch_name) ?> &mdash; Branch-scoped customer payment management. Receipts are generated automatically for each recorded payment.</small></div>
         <div class="d-flex align-items-center flex-wrap" style="gap:8px;">
             <span class="branch-badge"><i class="fas fa-code-branch"></i> <?= h($branch_name) ?></span>
             <span class="branch-badge"><i class="fas fa-star"></i> <?= points2($tenant_loyalty_rate) ?> points / $100</span>
-            <button class="btn-primary-custom" id="addReceiptBtn"><i class="fas fa-plus"></i> New Receipt</button>
+            <button class="btn-primary-custom" id="addReceiptBtn"><i class="fas fa-plus"></i> Record Payment</button>
         </div>
     </div>
 
     <div class="filters-card">
         <div class="filter-form">
-            <div class="filter-group"><label>Search</label><input type="text" id="searchInput" class="form-control" placeholder="Receipt #, customer, reference..."></div>
+            <div class="filter-group"><label>Search</label><input type="text" id="searchInput" class="form-control" placeholder="Payment #, receipt #, customer, reference..."></div>
             <div class="filter-group customer-search-wrap"><label>Customer</label><input type="hidden" id="customerFilter" value="0"><input type="text" id="customerFilterSearch" class="form-control" placeholder="Search customer..." autocomplete="off"><div id="customerFilterResults" class="customer-search-results"></div></div>
             <div><button class="btn btn-secondary" id="resetBtn">Reset</button><button class="btn-primary-custom" id="refreshBtn" style="margin-left:8px;">Refresh</button></div>
         </div>
@@ -763,7 +794,7 @@ require_once __DIR__ . '/../includes/header.php';
 <div class="modal fade" id="receiptFormModal" tabindex="-1">
     <div class="modal-dialog modal-lg">
         <form class="modal-content" id="receiptForm">
-            <div class="modal-header" style="background:#2D1859;color:#fff;"><h5 class="modal-title" id="receiptFormTitle">New Receipt</h5><button type="button" class="close text-white" data-dismiss="modal">&times;</button></div>
+            <div class="modal-header" style="background:#2D1859;color:#fff;"><h5 class="modal-title" id="receiptFormTitle">Record Payment</h5><button type="button" class="close text-white" data-dismiss="modal">&times;</button></div>
             <div class="modal-body">
                 <input type="hidden" name="receipt_id" id="receipt_id">
                 <div class="row">
@@ -788,7 +819,7 @@ require_once __DIR__ . '/../includes/header.php';
                     <div class="col-md-12 form-group"><label>Notes</label><textarea name="notes" id="notes" class="form-control" rows="2"></textarea></div>
                 </div>
             </div>
-            <div class="modal-footer"><button type="button" class="btn btn-secondary" data-dismiss="modal">Cancel</button><button type="submit" class="btn-primary-custom">Save Receipt</button></div>
+            <div class="modal-footer"><button type="button" class="btn btn-secondary" data-dismiss="modal">Cancel</button><button type="submit" class="btn-primary-custom">Record Payment</button></div>
         </form>
     </div>
 </div>
@@ -891,8 +922,8 @@ function loadReceipts() {
 function bindTableEvents() {
     $('.pagination-link').off('click').on('click', function() { currentPage = Number($(this).data('page')) || 1; loadReceipts(); });
     $('.view-receipt').off('click').on('click', function() { const id = $(this).data('id'); $('#viewReceiptBody').html('<div class="text-center p-4"><i class="fas fa-spinner fa-spin"></i></div>'); $('#viewReceiptModal').modal('show'); $.post(window.location.href, {ajax_action: 'view_receipt', receipt_id: id}, function(res) { $('#viewReceiptBody').html(res.success ? res.html : `<div class="alert alert-danger">${escapeHtml(res.message)}</div>`); }, 'json'); });
-    $('.edit-receipt').off('click').on('click', function() { const id = $(this).data('id'); $.post(window.location.href, {ajax_action: 'get_receipt_data', receipt_id: id}, function(res) { if (!res.success) { showAlert('error', res.message); return; } const r = res.receipt; resetForm(); $('#receiptFormTitle').text('Update Receipt'); $('#receipt_id').val(r.id); selectCustomerFromObject({id: r.customer_id, customer_name: r.customer_name, phone: r.customer_phone, loyalty_points: r.loyalty_points}, 'form'); $('#original_amount').val(fixed2(r.original_amount)); $('#discount_applied').val(fixed2(r.discount_applied)); $('#points_used').val(fixed2(r.points_used)); $('#payment_date').val(r.payment_date); $('#payment_method').val(r.payment_method); $('#reference_number').val(r.reference_number || ''); $('#bank_account_id').val(r.bank_account_id || ''); $('#notes').val(r.notes || ''); calculateFormAmounts(); $('#receiptFormModal').modal('show'); }, 'json'); });
-    $('.delete-receipt').off('click').on('click', function() { if (!confirm('Delete this receipt? Points will be reversed.')) return; $.post(window.location.href, {ajax_action: 'delete_receipt', receipt_id: $(this).data('id')}, function(res) { showAlert(res.success ? 'success' : 'error', res.message); if (res.success) loadReceipts(); }, 'json'); });
+    $('.edit-receipt').off('click').on('click', function() { const id = $(this).data('id'); $.post(window.location.href, {ajax_action: 'get_receipt_data', receipt_id: id}, function(res) { if (!res.success) { showAlert('error', res.message); return; } const r = res.receipt; resetForm(); $('#receiptFormTitle').text('Edit Payment'); $('#receipt_id').val(r.id); selectCustomerFromObject({id: r.customer_id, customer_name: r.customer_name, phone: r.customer_phone, loyalty_points: r.loyalty_points}, 'form'); $('#original_amount').val(fixed2(r.original_amount)); $('#discount_applied').val(fixed2(r.discount_applied)); $('#points_used').val(fixed2(r.points_used)); $('#payment_date').val(r.payment_date); $('#payment_method').val(r.payment_method); $('#reference_number').val(r.reference_number || ''); $('#bank_account_id').val(r.bank_account_id || ''); $('#notes').val(r.notes || ''); calculateFormAmounts(); $('#receiptFormModal').modal('show'); }, 'json'); });
+    $('.delete-receipt').off('click').on('click', function() { if (!confirm('Delete this payment? The related receipt will be voided and any loyalty points will be reversed.')) return; $.post(window.location.href, {ajax_action: 'delete_receipt', receipt_id: $(this).data('id')}, function(res) { showAlert(res.success ? 'success' : 'error', res.message); if (res.success) loadReceipts(); }, 'json'); });
 }
 
 function resetForm() {
@@ -902,7 +933,7 @@ function resetForm() {
     $('#customer_search').val('');
     $('#customerResults').hide().empty();
     $('#selectedCustomerInfo').hide().empty();
-    $('#receiptFormTitle').text('New Receipt');
+    $('#receiptFormTitle').text('Record Payment');
     $('#payment_date').val('<?= date('Y-m-d') ?>');
     $('#discount_applied').val('0.00');
     $('#points_used').val('0.00');

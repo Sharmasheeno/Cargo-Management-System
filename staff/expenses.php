@@ -51,6 +51,24 @@ try {
     $branch_name = (string)($st->fetchColumn() ?: $branch_name);
 } catch (Throwable $e) {}
 
+// Compute initial summary server-side so first paint matches the Dashboard KPI.
+// The AJAX summary endpoint below uses the SAME query and keeps filter/refresh in sync.
+$initial_total = 0.0;
+$initial_count = 0;
+try {
+    $st = $pdo->prepare("
+        SELECT COUNT(*) AS n, COALESCE(SUM(e.amount),0) AS total
+        FROM expenses e
+        LEFT JOIN trucking_trips t ON t.id = e.trip_id AND t.tenant_id = e.tenant_id
+        WHERE e.tenant_id = ? AND COALESCE(e.is_active,1)=1
+          AND t.branch_id = ?
+    ");
+    $st->execute([$tenant_id, $assigned_branch_id]);
+    $row = $st->fetch(PDO::FETCH_ASSOC) ?: ['n' => 0, 'total' => 0];
+    $initial_count = (int)$row['n'];
+    $initial_total = (float)$row['total'];
+} catch (Throwable $e) {}
+
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['ajax_action'])) {
     require_once __DIR__ . '/../includes/csrf.php';
     require_csrf_token();
@@ -106,13 +124,14 @@ require_once __DIR__ . '/../includes/header.php';
 <div class="container-fluid" style="padding:20px;">
   <div class="d-flex justify-content-between align-items-center mb-3">
     <div>
-      <h2><i class="fas fa-receipt text-primary"></i> Expenses</h2>
-      <p class="text-muted mb-0">Read-only financial visibility for <?= h($branch_name) ?>.</p>
+      <h2><i class="fas fa-receipt text-primary"></i> Trip Operational Expenses</h2>
+      <p class="text-muted mb-0">Operational costs associated with trips for <?= h($branch_name) ?>.</p>
+      <p class="text-muted mb-0" style="font-size:13px;">These expenses are managed by the Branch Manager and are visible here for financial review.</p>
     </div>
   </div>
   <div class="row mb-3">
-    <div class="col-md-4 mb-2"><div class="card border-0 shadow-sm"><div class="card-body"><small>Total Expenses</small><h3 id="sumAmount">$0.00</h3></div></div></div>
-    <div class="col-md-4 mb-2"><div class="card border-0 shadow-sm"><div class="card-body"><small>Expense Rows</small><h3 id="sumCount">0</h3></div></div></div>
+    <div class="col-md-4 mb-2"><div class="card border-0 shadow-sm"><div class="card-body"><small>Total Expenses</small><h3 id="sumAmount">$<?= money2($initial_total) ?></h3></div></div></div>
+    <div class="col-md-4 mb-2"><div class="card border-0 shadow-sm"><div class="card-body"><small>Expense Records</small><h3 id="sumCount"><?= number_format($initial_count) ?></h3></div></div></div>
   </div>
   <div class="card border-0 shadow-sm">
     <div class="card-body">
@@ -126,7 +145,6 @@ require_once __DIR__ . '/../includes/header.php';
           <tbody></tbody>
         </table>
       </div>
-      <p class="text-muted mb-0"><i class="fas fa-lock"></i> Finance Manager can view expenses here; creation/edit/delete remains outside this staff finance page.</p>
     </div>
   </div>
 </div>
@@ -147,7 +165,7 @@ function loadExpenses(){
     res.rows.forEach(r => {
       html += `<tr><td>${esc(r.expense_date)}</td><td><strong>${esc(r.expense_number)}</strong></td><td>${esc(r.expense_category)}</td><td>${esc(r.vendor_name || '-')}</td><td>${esc(r.trip_number || '-')}</td><td>${money(r.amount)}</td><td>${esc(r.notes || '')}</td><td>${esc(r.created_by_name || '-')}</td></tr>`;
     });
-    $('#expenseTable tbody').html(html || '<tr><td colspan="8" class="text-center text-muted">No expenses found.</td></tr>');
+    $('#expenseTable tbody').html(html || '<tr><td colspan="8" class="text-center text-muted">No trip expenses found for this branch.</td></tr>');
   }, 'json');
 }
 $(function(){ loadSummary(); loadExpenses(); $('#searchInput,#categoryInput').on('input', function(){ clearTimeout(window.expTimer); window.expTimer=setTimeout(loadExpenses,250); }); });

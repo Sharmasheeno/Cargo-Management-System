@@ -136,8 +136,8 @@ require_once __DIR__ . '/../includes/header.php';
 <div class="container-fluid" style="padding:20px;">
   <div class="d-flex justify-content-between align-items-center mb-3">
     <div>
-      <h2><i class="fas fa-users text-primary"></i> Customer Financial History</h2>
-      <p class="text-muted mb-0">Tenant and branch-scoped customer balances, invoices, and receipts.</p>
+      <h2><i class="fas fa-users text-primary"></i> Customers</h2>
+      <p class="text-muted mb-0">Branch customer accounts &mdash; total invoiced, total paid, outstanding balance, and loyalty. Open a customer for full financial history.</p>
     </div>
   </div>
   <div class="card border-0 shadow-sm">
@@ -145,7 +145,7 @@ require_once __DIR__ . '/../includes/header.php';
       <input id="searchInput" class="form-control mb-3" placeholder="Search customer name, phone, email...">
       <div class="table-responsive">
         <table class="table table-hover table-sm" id="customerTable">
-          <thead class="thead-light"><tr><th>Customer</th><th>Phone</th><th>Invoiced</th><th>Paid</th><th>Outstanding</th><th>Credit Limit</th><th>Loyalty</th><th>Action</th></tr></thead>
+          <thead class="thead-light"><tr><th>Customer</th><th>Phone</th><th>Total Invoiced</th><th>Total Paid</th><th>Outstanding</th><th>Credit Limit</th><th>Loyalty</th><th>Action</th></tr></thead>
           <tbody></tbody>
         </table>
       </div>
@@ -154,7 +154,7 @@ require_once __DIR__ . '/../includes/header.php';
 </div>
 
 <div class="modal fade" id="historyModal" tabindex="-1"><div class="modal-dialog modal-xl"><div class="modal-content">
-  <div class="modal-header"><h5 class="modal-title">Customer Financial History</h5><button type="button" class="close" data-dismiss="modal">&times;</button></div>
+  <div class="modal-header"><h5 class="modal-title">Customer Account &mdash; Summary, Invoices, Payments, Receipts</h5><button type="button" class="close" data-dismiss="modal">&times;</button></div>
   <div class="modal-body" id="historyBody"></div>
 </div></div></div>
 

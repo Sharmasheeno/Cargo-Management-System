@@ -295,22 +295,22 @@ require_once __DIR__ . '/../includes/header.php';
     <?php elseif ($current_role_type === 'finance_manager'): ?>
         <div class="row mb-3">
             <div class="col-md-2 col-sm-6 mb-3"><div class="stat-card"><small>Invoices</small><div class="num"><?= number_format($finance['invoice_count']) ?></div></div></div>
-            <div class="col-md-2 col-sm-6 mb-3"><div class="stat-card"><small>Total Invoiced</small><div class="num">$<?= number_format($finance['total_invoiced'], 2) ?></div></div></div>
-            <div class="col-md-2 col-sm-6 mb-3"><div class="stat-card"><small>Payments</small><div class="num">$<?= number_format($finance['receipts_total'], 2) ?></div></div></div>
+            <div class="col-md-2 col-sm-6 mb-3"><div class="stat-card"><small>Total Billed</small><div class="num">$<?= number_format($finance['total_invoiced'], 2) ?></div></div></div>
+            <div class="col-md-2 col-sm-6 mb-3"><div class="stat-card"><small>Invoice Paid</small><div class="num">$<?= number_format($finance['total_paid'], 2) ?></div></div></div>
             <div class="col-md-2 col-sm-6 mb-3"><div class="stat-card"><small>Outstanding</small><div class="num">$<?= number_format($finance['outstanding'], 2) ?></div></div></div>
-            <div class="col-md-2 col-sm-6 mb-3"><div class="stat-card"><small>Receipts</small><div class="num"><?= number_format($finance['receipts_count']) ?></div></div></div>
-            <div class="col-md-2 col-sm-6 mb-3"><div class="stat-card"><small>Expenses</small><div class="num">$<?= number_format($finance['expenses_total'], 2) ?></div></div></div>
+            <div class="col-md-2 col-sm-6 mb-3"><div class="stat-card"><small>Recorded Payments</small><div class="num">$<?= number_format($finance['receipts_total'], 2) ?></div></div></div>
+            <div class="col-md-2 col-sm-6 mb-3"><div class="stat-card"><small>Trip Expenses</small><div class="num">$<?= number_format($finance['expenses_total'], 2) ?></div></div></div>
         </div>
         <div class="row mb-3">
             <div class="col-md-3 mb-3"><a class="quick-card" href="invoices.php"><i class="fas fa-file-invoice-dollar"></i> Invoices</a></div>
             <div class="col-md-3 mb-3"><a class="quick-card" href="payments.php"><i class="fas fa-credit-card"></i> Payments</a></div>
-            <div class="col-md-3 mb-3"><a class="quick-card" href="receipts.php"><i class="fas fa-hand-holding-dollar"></i> Receipts</a></div>
-            <div class="col-md-3 mb-3"><a class="quick-card" href="customer_financial_history.php"><i class="fas fa-users"></i> Customer Financial History</a></div>
-            <div class="col-md-3 mb-3"><a class="quick-card" href="expenses.php"><i class="fas fa-receipt"></i> Expenses / Visibility</a></div>
+            <div class="col-md-3 mb-3"><a class="quick-card" href="customer_financial_history.php"><i class="fas fa-users"></i> Customers</a></div>
+            <div class="col-md-3 mb-3"><a class="quick-card" href="expenses.php"><i class="fas fa-receipt"></i> Trip Expenses</a></div>
         </div>
+        <p class="text-muted mb-3" style="font-size:13px;">Invoice Paid reflects amounts recorded on invoices. Recorded Payments reflects payment transactions currently available.</p>
         <div class="row">
             <div class="col-md-6 mb-3"><div class="stat-card"><small>Open Invoices / Outstanding Balances</small><?php foreach ($finance['open_invoices'] as $i): ?><div class="mt-2"><strong><?= h($i['invoice_number']) ?></strong> <?= h($i['customer_name'] ?: '-') ?><br><span class="text-muted">$<?= number_format((float)$i['total_amount'] - (float)$i['paid_amount'], 2) ?> outstanding · <?= h($i['status']) ?></span></div><?php endforeach; if (!$finance['open_invoices']): ?><p class="text-muted mb-0 mt-2">No open invoices.</p><?php endif; ?></div></div>
-            <div class="col-md-6 mb-3"><div class="stat-card"><small>Recent Receipts / Payments</small><?php foreach ($finance['recent_receipts'] as $r): ?><div class="mt-2"><strong><?= h($r['receipt_number']) ?></strong> <?= h($r['customer_name'] ?: '-') ?><br><span class="text-muted">$<?= number_format((float)$r['amount'], 2) ?> · <?= h($r['payment_date']) ?></span></div><?php endforeach; if (!$finance['recent_receipts']): ?><p class="text-muted mb-0 mt-2">No recent receipts.</p><?php endif; ?></div></div>
+            <div class="col-md-6 mb-3"><div class="stat-card"><small>Recent Payments &amp; Receipts</small><?php foreach ($finance['recent_receipts'] as $r): ?><div class="mt-2"><strong><?= h($r['receipt_number']) ?></strong> <?= h($r['customer_name'] ?: '-') ?><br><span class="text-muted">$<?= number_format((float)$r['amount'], 2) ?> · <?= h($r['payment_date']) ?></span></div><?php endforeach; if (!$finance['recent_receipts']): ?><p class="text-muted mb-0 mt-2">No recent payments recorded.</p><?php endif; ?></div></div>
         </div>
     <?php else: ?>
         <div class="card shadow-sm border-0">
