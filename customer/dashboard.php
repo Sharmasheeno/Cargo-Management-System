@@ -2,24 +2,7 @@
 // customer/dashboard.php
 // Customer Dashboard forfaras cargo - Customer Portal
 
-if (session_status() === PHP_SESSION_NONE) {
-    session_start();
-}
-
-// Check if user is logged in and has customer role
-if (!isset($_SESSION['user_id']) || $_SESSION['role'] !== 'customer') {
-    header("Location: ../login.php");
-    exit;
-}
-
-$role = $_SESSION['role'];
-$session_customer_id = $_SESSION['customer_id'] ?? 0;
-$session_tenant_id = $_SESSION['tenant_id'] ?? 0;
-
-require_once __DIR__ . '/../config/db_connect.php';
-
-$user_id = $_SESSION['user_id'];
-$user_name = $_SESSION['user_name'] ?? 'Customer';
+require_once __DIR__ . '/_auth.php';
 
 // Get customer data from database
 $customer_data = [];

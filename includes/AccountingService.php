@@ -49,7 +49,9 @@ class AccountingService {
                 // 2. Update Chart of Accounts balance
                 // Debit increases Assets/Expenses, decreases Liabilities/Equity/Revenue
                 // Credit increases Liabilities/Equity/Revenue, decreases Assets/Expenses
-                $stmtAcc = $this->pdo->prepare("SELECT account_type FROM chart_of_accounts WHERE account_code = ? AND (tenant_id = ? OR tenant_id IS NULL)");
+                // Scoped to THIS tenant's own CoA row so postings never bleed
+                // into the tenant-agnostic (tenant_id IS NULL) seed rows.
+                $stmtAcc = $this->pdo->prepare("SELECT id, account_type FROM chart_of_accounts WHERE account_code = ? AND tenant_id = ?");
                 $stmtAcc->execute([$line['account_code'], $this->tenant_id]);
                 $acc = $stmtAcc->fetch();
 
@@ -61,8 +63,8 @@ class AccountingService {
                         $adjustment = $line['credit'] - $line['debit'];
                     }
 
-                    $updateAcc = $this->pdo->prepare("UPDATE chart_of_accounts SET balance = balance + ? WHERE account_code = ? AND (tenant_id = ? OR tenant_id IS NULL)");
-                    $updateAcc->execute([$adjustment, $line['account_code'], $this->tenant_id]);
+                    $updateAcc = $this->pdo->prepare("UPDATE chart_of_accounts SET balance = balance + ? WHERE id = ?");
+                    $updateAcc->execute([$adjustment, $acc['id']]);
                 }
             }
 
@@ -137,11 +139,18 @@ class AccountingService {
 
         if (!$bill) return false;
 
+        // Vendor_bills schema stores total in `total_amount` and has no
+        // per-bill category column (categorization lives on line items /
+        // vendor). Prior code read `amount` / `category` — both absent —
+        // which posted NULL debit/credit lines. Use the correct fields
+        // and default the account name to "Cost of Sales".
+        $amount   = (float)($bill['total_amount'] ?? 0);
+        $category = $bill['category'] ?? null;
         $lines = [
             // Debit Expense (5000)
-            ['account_name' => $bill['category'] ?: 'Cost of Sales', 'account_code' => '5000', 'debit' => $bill['amount'], 'credit' => 0],
+            ['account_name' => $category ?: 'Cost of Sales', 'account_code' => '5000', 'debit' => $amount, 'credit' => 0],
             // Credit Accounts Payable (2000)
-            ['account_name' => 'Accounts Payable', 'account_code' => '2000', 'debit' => 0, 'credit' => $bill['amount']]
+            ['account_name' => 'Accounts Payable', 'account_code' => '2000', 'debit' => 0, 'credit' => $amount]
         ];
 
         return $this->postToLedger($bill['bill_number'], $bill['bill_date'], "Vendor Bill: " . $bill['bill_number'], $lines, 'vendor_bill', $bill['id']);

@@ -306,7 +306,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['ajax_action']) && $_P
                 $pdo->prepare("UPDATE invoices SET paid_amount = paid_amount + ?, status = IF(paid_amount >= total_amount, 'paid', 'partial') WHERE id = ?")->execute([$amount, $invoice_id]);
             }
             
-            $pdo->prepare("UPDATE customers SET debt_amount = debt_amount - ?, updated_at = NOW() WHERE id = ?")->execute([$amount, $customer_id]);
+            // NOTE: Customer debt is decremented exactly once by the
+            // `trigger_update_debt` trigger on receipts INSERT. Do NOT
+            // decrement debt_amount here as well — that reintroduces the
+            // historical double-decrement defect.
             
             if ($bank_id) {
                 $pdo->prepare("UPDATE bank_accounts SET current_balance = current_balance + ? WHERE id = ?")->execute([$amount, $bank_id]);

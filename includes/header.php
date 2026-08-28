@@ -124,6 +124,10 @@ if ($role === 'superadmin' && isset($_SESSION['selected_tenant_id']) && $_SESSIO
     $current_tenant_id = $_SESSION['selected_tenant_id'];
 }
 
+// Every page that includes this header gains access to the shared Super
+// Admin tenant-scope resolver — see includes/sa_scope.php for contract.
+require_once __DIR__ . '/sa_scope.php';
+
 // PRIORITY 1: If user has a tenant_id, show that tenant's name
 if ($current_tenant_id) {
     try {
@@ -960,8 +964,10 @@ body.sidebar-collapsed .main-content {
     <?php elseif (in_array($role, ['staff','reception_clerk','warehouse_supervisor','logistics_supervisor','finance_manager','clerk'], true)): ?>
       <!-- ==================== STAFF SIDEBAR ==================== -->
       <li><a href="../staff/dashboard.php" class="<?= $currentPage == 'dashboard.php' ? 'active' : '' ?>"><i class="fa-solid fa-house"></i><span>Dashboard</span></a></li>
-      <li><a href="../staff/shipments.php"><i class="fa-solid fa-boxes-stacked"></i><span>Shipments</span></a></li>
-      <?php if ($role_type === 'reception_clerk' || $role_type === 'clerk'): ?>
+      <?php if ($role_type !== 'finance_manager'): ?>
+        <li><a href="../staff/shipments.php"><i class="fa-solid fa-boxes-stacked"></i><span>Shipments</span></a></li>
+      <?php endif; ?>
+      <?php if ($role_type === 'reception_clerk'): ?>
         <!-- Reception intake belongs to reception clerks. -->
         <li><a href="../staff/receptions.php"><i class="fa-solid fa-clipboard-check"></i><span>Receptions</span></a></li>
       <?php endif; ?>
@@ -972,7 +978,9 @@ body.sidebar-collapsed .main-content {
       <?php if ($role_type === 'warehouse_supervisor'): ?>
         <li><a href="../staff/warehouse_stock.php"><i class="fa-solid fa-warehouse"></i><span>Warehouse Stock</span></a></li>
       <?php endif; ?>
-      <li><a href="../staff/stock_movements.php"><i class="fa-solid fa-right-left"></i><span>Stock Movements</span></a></li>
+      <?php if ($role_type === 'warehouse_supervisor' || $role_type === 'logistics_supervisor'): ?>
+        <li><a href="../staff/stock_movements.php"><i class="fa-solid fa-right-left"></i><span>Stock Movements</span></a></li>
+      <?php endif; ?>
 
       <?php if ($role_type === 'logistics_supervisor'): ?>
         <!-- Trip / Container management belongs to logistics, not destination warehouse. -->
@@ -980,19 +988,22 @@ body.sidebar-collapsed .main-content {
         <li><a href="../staff/containers.php"><i class="fa-solid fa-truck-loading"></i><span>Containers</span></a></li>
       <?php endif; ?>
       
-      <?php if ($role_type === 'finance_manager' || $role_type === 'clerk'): ?>
+      <?php if ($role_type === 'finance_manager'): ?>
         <li><a href="../staff/invoices.php"><i class="fa-solid fa-file-invoice-dollar"></i><span>Invoices</span></a></li>
+        <li><a href="../staff/payments.php"><i class="fa-solid fa-credit-card"></i><span>Payments</span></a></li>
         <li><a href="../staff/receipts.php"><i class="fa-solid fa-hand-holding-dollar"></i><span>Receipts</span></a></li>
+        <li><a href="../staff/customer_financial_history.php"><i class="fa-solid fa-users"></i><span>Customer Finance</span></a></li>
+        <li><a href="../staff/expenses.php"><i class="fa-solid fa-receipt"></i><span>Expenses</span></a></li>
       <?php endif; ?>
 
-    <?php elseif ($role === 'driver' || $role === 'delivery_agent'): ?>
+    <?php elseif ($role_type === 'driver' || $role_type === 'delivery_agent'): ?>
       <!-- ==================== DRIVER / COURIER SIDEBAR ==================== -->
       <li><a href="../driver/index.php" class="<?= $currentPage == 'index.php' ? 'active' : '' ?>"><i class="fa-solid fa-house"></i><span>Dashboard</span></a></li>
-      <?php if ($role === 'driver'): ?>
+      <?php if ($role_type === 'driver'): ?>
         <li><a href="../driver/my_trips.php" class="<?= $currentPage == 'my_trips.php' ? 'active' : '' ?>"><i class="fa-solid fa-road"></i><span>My Trips</span></a></li>
         <li><a href="../driver/profile.php" class="<?= $currentPage == 'profile.php' ? 'active' : '' ?>"><i class="fa-solid fa-user"></i><span>Profile</span></a></li>
       <?php endif; ?>
-      <?php if ($role === 'delivery_agent'): ?>
+      <?php if ($role_type === 'delivery_agent'): ?>
         <li><a href="../driver/deliveries.php" class="<?= $currentPage == 'deliveries.php' ? 'active' : '' ?>"><i class="fa-solid fa-motorcycle"></i><span>My Deliveries</span></a></li>
       <?php endif; ?>
 

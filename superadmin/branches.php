@@ -22,6 +22,7 @@ if ($role === 'company_admin') {
 }
 
 require_once __DIR__ . '/../config/db_connect.php';
+require_once __DIR__ . '/../includes/sa_scope.php';
 
 $user_id = $_SESSION['user_id'];
 $user_name = $_SESSION['user_name'] ?? $_SESSION['full_name'] ?? 'Super Admin';
@@ -171,7 +172,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['ajax_action'])) {
         $offset = ($page - 1) * $limit;
         
         $search = $_POST['search'] ?? '';
-        $tenant_filter = ($role === 'superadmin') ? (isset($_POST['tenant']) ? (int)$_POST['tenant'] : 0) : $session_tenant_id;
+        $tenant_filter = ($role === 'superadmin') ? (isset($_POST['tenant']) ? (int)$_POST['tenant'] : sa_selected_tenant_id_int()) : $session_tenant_id;
         $branch_type_filter = $_POST['branch_type'] ?? '';
         $status_filter = $_POST['status'] ?? '';
         
@@ -587,7 +588,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['ajax_action'])) {
     }
     
     elseif ($action === 'get_stats') {
-        $tenant_filter = isset($_POST['tenant']) ? (int)$_POST['tenant'] : 0;
+        $tenant_filter = isset($_POST['tenant']) ? (int)$_POST['tenant'] : sa_selected_tenant_id_int();
         $where = $tenant_filter > 0 ? "WHERE tenant_id = $tenant_filter" : "";
         
         $stmt = $pdo->query("
@@ -1110,6 +1111,116 @@ require_once __DIR__ . '/../includes/header.php';
 </div>
 
 <script src="https://code.jquery.com/jquery-3.6.0.min.js"></script>
+<script>
+// [csrf-shim] inline jQuery pages need the same ajaxSetup guard that
+// includes/footer.php installs. Attach X-CSRF-Token to every same-origin
+// mutation from this page.
+(function () {
+    var m = document.querySelector('meta[name="csrf-token"]');
+    if (!m || !window.jQuery) return;
+    var token = m.getAttribute('content') || '';
+    jQuery.ajaxSetup({
+        beforeSend: function (xhr, settings) {
+            var method = (settings.type || 'GET').toUpperCase();
+            if (method === 'GET' || method === 'HEAD' || method === 'OPTIONS') return;
+            if (settings.crossDomain) return;
+            xhr.setRequestHeader('X-CSRF-Token', token);
+            if (settings.data instanceof FormData && !settings.data.has('csrf_token')) {
+                settings.data.append('csrf_token', token);
+            }
+        }
+    });
+
+// [async-error-shim] Standardize AJAX failure handling so every finance
+// page shows a controlled error instead of a permanent spinner. This
+// runs after the jQuery.ajaxSetup shim above, so both live on the same
+// jQuery instance.
+(function () {
+    if (!window.jQuery) return;
+    if (window.__FIN_ASYNC_SHIM__) return;
+    window.__FIN_ASYNC_SHIM__ = true;
+    // Install an ajaxSend handler that marks the click-source button
+    // with data-finance-pending. Fires once per shim install.
+    if (!window.__FIN_SEND_MARK__) {
+        window.__FIN_SEND_MARK__ = true;
+        jQuery(document).on('ajaxSend', function (event, xhr, settings) {
+            try {
+                if (!settings || settings.crossDomain) return;
+                var el = document.activeElement;
+                if (!el) return;
+                var tag = (el.tagName || '').toUpperCase();
+                if (tag !== 'BUTTON' && !(tag === 'INPUT' && (el.type || '').toLowerCase() === 'submit')) return;
+                var $el = jQuery(el);
+                // If it isn't disabled at the moment ajax fires, the
+                // caller isn't gating this button on the request, so
+                // don't mark it.
+                if (!$el.prop('disabled')) return;
+                if ($el.attr('data-finance-pending') === '1') return;
+                if ($el.attr('data-original-html') === undefined) {
+                    $el.attr('data-original-html', $el.html());
+                }
+                $el.attr('data-finance-pending', '1');
+            } catch (e) {}
+        });
+    }
+    jQuery(document).ajaxError(function (event, xhr, settings, thrownError) {
+        // Skip cross-domain or explicitly-suppressed calls.
+        if (settings && settings.crossDomain) return;
+        if (settings && settings.suppressGlobalError) return;
+        var msg;
+        try {
+            var body = xhr && xhr.responseText ? xhr.responseText : '';
+            var parsed = null;
+            try { parsed = body ? JSON.parse(body) : null; } catch (e) {}
+            if (parsed && parsed.message) msg = parsed.message;
+            else if (xhr && xhr.status === 0) msg = 'Network error — request could not complete';
+            else if (xhr && xhr.status === 403) msg = 'Not authorized (403)';
+            else if (xhr && xhr.status === 404) msg = 'Endpoint not found (404)';
+            else if (xhr && xhr.status >= 500) msg = 'Server error (' + xhr.status + ')';
+            else msg = 'Request failed' + (xhr && xhr.status ? ' (' + xhr.status + ')' : '');
+        } catch (e) {
+            msg = 'Request failed';
+        }
+        // Try Bootstrap toast first if present; fall back to alert.
+        try {
+            if (window.jQuery && window.jQuery.fn && window.jQuery.fn.toast) {
+                var $c = jQuery('#toast-container');
+                if (!$c.length) {
+                    $c = jQuery('<div id="toast-container" style="position:fixed;top:20px;right:20px;z-index:99999;"></div>').appendTo('body');
+                }
+                var $t = jQuery('<div class="alert alert-danger" role="alert" style="min-width:280px;box-shadow:0 2px 8px rgba(0,0,0,.15);">' + jQuery('<div/>').text(msg).html() + '</div>');
+                $c.append($t);
+                setTimeout(function () { $t.fadeOut(400, function(){ jQuery(this).remove(); }); }, 5000);
+                return;
+            }
+        } catch (e) {}
+                // [async-error-shim-v3] Targeted UI-state recovery. Only restores
+        // buttons that were explicitly marked at ajaxSend time with
+        // data-finance-pending="1" and whose original HTML was captured
+        // in data-original-html. Never touches other disabled controls —
+        // tenant-validation locks, RBAC locks, workflow gates, and
+        // missing-required-selection blockers all stay locked as
+        // intended.
+        try {
+            jQuery('[data-finance-pending="1"]').each(function () {
+                var $b = jQuery(this);
+                var orig = $b.attr('data-original-html');
+                if (orig !== undefined && orig !== null) $b.html(orig);
+                $b.prop('disabled', false);
+                $b.removeAttr('data-finance-pending');
+                $b.removeAttr('data-original-html');
+            });
+        } catch (e) {}
+        // Only alert once per 5-second window to prevent alert-storms.
+        if (!window.__FIN_ALERT_LOCK__) {
+            window.__FIN_ALERT_LOCK__ = true;
+            try { window.alert(msg); } catch (e) {}
+            setTimeout(function () { window.__FIN_ALERT_LOCK__ = false; }, 5000);
+        }
+    });
+})();
+})();
+</script>
 <script src="https://cdn.jsdelivr.net/npm/bootstrap@4.5.2/dist/js/bootstrap.bundle.min.js"></script>
 
 <script>

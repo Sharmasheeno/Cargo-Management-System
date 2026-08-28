@@ -49,6 +49,7 @@ if (!function_exists('ensureShipmentSchema')) {
         // used by superadmin/tenant_admin warehouse_stock loading flows).
         // The real master-shipment link therefore uses master_shipment_id.
         shipmentAddColumn($pdo, 'packages', 'shipment_id', "INT DEFAULT NULL");
+        shipmentAddColumn($pdo, 'shipments', 'quantity_unit', "VARCHAR(30) DEFAULT NULL");
         shipmentAddColumn($pdo, 'warehouse_stock', 'shipment_id', "INT DEFAULT NULL");
         shipmentAddColumn($pdo, 'warehouse_stock', 'branch_id', "INT DEFAULT NULL");
         shipmentAddColumn($pdo, 'cargo_manifest_items', 'master_shipment_id', "INT DEFAULT NULL");
@@ -81,6 +82,7 @@ if (!function_exists('shipmentCreateTables')) {
             quantity INT NOT NULL DEFAULT 1,
             weight_kg DECIMAL(10,2) DEFAULT 0.00,
             volume_cbm DECIMAL(10,4) DEFAULT 0.0000,
+            quantity_unit VARCHAR(30) DEFAULT NULL,
             declared_value DECIMAL(15,2) DEFAULT 0.00,
             delivery_method ENUM('branch_pickup','door_delivery') DEFAULT 'branch_pickup',
             payment_policy VARCHAR(30) DEFAULT 'pay_at_destination',
@@ -505,8 +507,28 @@ if (!function_exists('resume_shipment_from_hold')) {
 // stock_movements.reference_type='shipment').
 // ============================================================================
 if (!function_exists('record_stock_movement')) {
+    function ensureStockMovementSemanticColumns(PDO $pdo): void {
+        foreach ([
+            'movement_event' => "VARCHAR(40) DEFAULT NULL",
+            'from_location' => "VARCHAR(255) DEFAULT NULL",
+            'to_location' => "VARCHAR(255) DEFAULT NULL",
+            'reference_label' => "VARCHAR(120) DEFAULT NULL",
+        ] as $column => $definition) {
+            try {
+                $chk = $pdo->prepare("SHOW COLUMNS FROM stock_movements LIKE ?");
+                $chk->execute([$column]);
+                if (!$chk->fetch(PDO::FETCH_ASSOC)) {
+                    $pdo->exec("ALTER TABLE stock_movements ADD COLUMN {$column} {$definition}");
+                }
+            } catch (Throwable $e) {
+                error_log('ensureStockMovementSemanticColumns: ' . $e->getMessage());
+            }
+        }
+    }
+
     function record_stock_movement(array $m): int {
         $pdo = shipment_db();
+        ensureStockMovementSemanticColumns($pdo);
         // stock_movements.created_by carries an FK to users(id) in existing
         // installs: only pass a user id that actually exists, else NULL.
         $userId = $m['created_by'] ?? ($_SESSION['user_id'] ?? null);
@@ -520,14 +542,19 @@ if (!function_exists('record_stock_movement')) {
         try {
             $stmt = $pdo->prepare("INSERT INTO stock_movements
                 (tenant_id, warehouse_stock_id, quantity_change, previous_quantity,
-                 new_quantity, movement_type, reference_type, reference_id, notes, created_by, created_at)
-                VALUES (?,?,?,?,?,?,?,?,?,?,NOW())");
+                 new_quantity, movement_type, movement_event, from_location, to_location,
+                 reference_type, reference_id, reference_label, notes, created_by, created_at)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,NOW())");
             $stmt->execute([
                 (int)$m['tenant_id'], (int)$m['warehouse_stock_id'],
                 (int)$m['quantity_change'], (int)$m['previous_quantity'], (int)$m['new_quantity'],
                 (string)$m['movement_type'],
+                $m['movement_event'] ?? null,
+                $m['from_location'] ?? null,
+                $m['to_location'] ?? null,
                 $m['reference_type'] ?? 'shipment',
                 $m['reference_id'] ?? null,
+                $m['reference_label'] ?? null,
                 $m['notes'] ?? null,
                 $userId,
             ]);
@@ -536,6 +563,59 @@ if (!function_exists('record_stock_movement')) {
             error_log('record_stock_movement: ' . $e->getMessage());
             return 0; // never block the operational flow on logging failure
         }
+    }
+}
+
+if (!function_exists('container_manifest_totals')) {
+    function container_manifest_totals(int $container_id, int $tenant_id): array {
+        $pdo = shipment_db();
+        $st = $pdo->prepare("
+            SELECT COUNT(DISTINCT cmi.master_shipment_id) AS shipment_count,
+                   COALESCE(SUM(cmi.quantity),0) AS total_quantity,
+                   COALESCE(SUM(cmi.cbm_used),0) AS used_cbm,
+                   COALESCE(SUM(cmi.weight_kg),0) AS weight_kg
+            FROM cargo_manifest_items cmi
+            WHERE cmi.container_id = ? AND cmi.tenant_id = ? AND cmi.master_shipment_id IS NOT NULL
+        ");
+        $st->execute([$container_id, $tenant_id]);
+        $row = $st->fetch(PDO::FETCH_ASSOC) ?: [];
+        return [
+            'shipment_count' => (int)($row['shipment_count'] ?? 0),
+            'total_quantity' => (int)($row['total_quantity'] ?? 0),
+            'used_cbm' => (float)($row['used_cbm'] ?? 0),
+            'weight_kg' => (float)($row['weight_kg'] ?? 0),
+        ];
+    }
+}
+
+if (!function_exists('sync_container_manifest_totals')) {
+    function sync_container_manifest_totals(int $container_id, int $tenant_id): void {
+        $pdo = shipment_db();
+        $totals = container_manifest_totals($container_id, $tenant_id);
+        try {
+            $st = $pdo->prepare("UPDATE containers SET size_used_cbm = ?, weight_kg = ?, updated_at = NOW() WHERE id = ? AND tenant_id = ?");
+            $st->execute([$totals['used_cbm'], $totals['weight_kg'], $container_id, $tenant_id]);
+        } catch (Throwable $e) {
+            error_log('sync_container_manifest_totals: ' . $e->getMessage());
+        }
+    }
+}
+
+if (!function_exists('container_has_final_trip')) {
+    function container_has_final_trip(int $container_id, int $tenant_id): bool {
+        $pdo = shipment_db();
+        $st = $pdo->prepare("SELECT COUNT(*) FROM trucking_trips WHERE container_id = ? AND tenant_id = ? AND status IN ('delivered','completed')");
+        $st->execute([$container_id, $tenant_id]);
+        return (int)$st->fetchColumn() > 0;
+    }
+}
+
+if (!function_exists('container_has_active_trip')) {
+    function container_has_active_trip(int $container_id, int $tenant_id): bool {
+        $pdo = shipment_db();
+        $st = $pdo->prepare("SELECT COUNT(*) FROM trucking_trips WHERE container_id = ? AND tenant_id = ? AND status NOT IN ('delivered','completed')");
+        $st->execute([$container_id, $tenant_id]);
+        return (int)$st->fetchColumn() > 0;
     }
 }
 
@@ -555,10 +635,10 @@ if (!function_exists('create_shipment_from_reception')) {
                 (tenant_id, shipment_number, tracking_number, customer_id,
                  sender_name, sender_phone, receiver_name, receiver_phone,
                  cargo_description, package_type, quantity, weight_kg,
-                 volume_cbm, declared_value, delivery_method,
+                 volume_cbm, quantity_unit, declared_value, delivery_method,
                  current_status, current_branch_id, origin_branch_id, destination_branch_id,
                  source_package_id, created_by, created_at)
-                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,NOW())");
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,NOW())");
             $ins->execute([
                 $tenant_id, $num, $trk, $pkg['customer_id'] ?? null,
                 $pkg['customer_name'] ?? null, $pkg['customer_phone'] ?? null,
@@ -566,7 +646,8 @@ if (!function_exists('create_shipment_from_reception')) {
                 $pkg['receiver_phone'] ?? ($pkg['customer_phone'] ?? null),
                 $pkg['package_name'] ?? null, $pkg['package_type'] ?? 'cargo',
                 max(1, (int)($pkg['quantity'] ?? 1)), (float)($pkg['weight_kg'] ?? 0),
-                (float)($pkg['volume_cbm'] ?? 0), (float)($pkg['declared_value'] ?? 0),
+                (float)($pkg['volume_cbm'] ?? 0), $pkg['quantity_unit'] ?? null,
+                (float)($pkg['declared_value'] ?? 0),
                 (($pkg['delivery_method'] ?? 'branch_pickup') === 'door_delivery') ? 'door_delivery' : 'branch_pickup',
                 'REGISTERED',
                 $branch_id, $branch_id, $destination_branch_id,
@@ -606,7 +687,7 @@ if (!function_exists('receive_shipment_into_warehouse')) {
      * rows for the same shipment are closed, so a shipment can never be
      * physically available in two warehouses at once.
      */
-    function receive_shipment_into_warehouse(int $shipment_id, int $branch_id, string $zone, string $rack, array $ctx = []): array {
+    function receive_shipment_into_warehouse(int $shipment_id, int $branch_id, string $zone, string $storage_location, array $ctx = []): array {
         $pdo = shipment_db();
         ensureShipmentSchema($pdo);
         $tenantId = (int)$ctx['tenant_id'];
@@ -614,6 +695,15 @@ if (!function_exists('receive_shipment_into_warehouse')) {
         $st->execute([$shipment_id, $tenantId]);
         $ship = $st->fetch(PDO::FETCH_ASSOC);
         if (!$ship) return ['ok' => false, 'message' => 'Shipment not found.'];
+        $isDest = !empty($ctx['is_destination']);
+        $targetStatus = $isDest ? 'IN_DESTINATION_WAREHOUSE' : 'IN_ORIGIN_WAREHOUSE';
+        if ((string)$ship['current_status'] === $targetStatus && (int)$ship['current_branch_id'] === $branch_id) {
+            $existing = $pdo->prepare("SELECT id FROM warehouse_stock WHERE shipment_id = ? AND tenant_id = ? AND branch_id = ? AND quantity > 0 AND is_active = 1 LIMIT 1");
+            $existing->execute([$shipment_id, $tenantId, $branch_id]);
+            if ($existing->fetchColumn()) {
+                return ['ok' => false, 'message' => 'This shipment is already active in this warehouse. Update its storage location instead of receiving it again.'];
+            }
+        }
 
         $pdo->prepare("UPDATE warehouse_stock SET is_active = 0,
                         notes = CONCAT(COALESCE(notes,''), ' [closed: moved out]')
@@ -630,32 +720,38 @@ if (!function_exists('receive_shipment_into_warehouse')) {
             $tenantId, $ship['customer_id'], 'local',
             ($ship['cargo_description'] ?: ('Shipment ' . $ship['shipment_number'])),
             $qty, (float)$ship['volume_cbm'],
-            0, 'Warehouse', $rack ?: null, $zone ?: null,
+            0, 'Warehouse', $storage_location ?: null, $zone ?: null,
             $shipment_id, $branch_id,
             'in_warehouse', 1,
         ]);
         $wsId = (int)$pdo->lastInsertId();
 
+        $locLabel = trim(($ctx['branch_name'] ?? '') . ' Warehouse'
+            . ($zone ? " / Zone {$zone}" : '') . ($storage_location ? " / {$storage_location}" : ''));
+        $warehouseLabel = trim(($ctx['branch_name'] ?? '') . ' Warehouse'
+            . ($zone || $storage_location ? ' · ' . trim(($zone ?: '-') . ' / ' . ($storage_location ?: '-')) : ''));
+        $event = $isDest ? 'unloaded_destination' : 'received_stored';
         record_stock_movement([
             'tenant_id' => $tenantId, 'warehouse_stock_id' => $wsId,
             'quantity_change' => $qty, 'previous_quantity' => 0, 'new_quantity' => $qty,
             'movement_type' => 'in',
+            'movement_event' => $event,
+            'from_location' => $ctx['from_location'] ?? ($isDest ? 'Container / Trip' : 'Reception'),
+            'to_location' => $warehouseLabel,
             'reference_type' => 'shipment', 'reference_id' => $shipment_id,
+            'reference_label' => $ctx['reference_label'] ?? null,
             'notes' => 'IN: Reception to Warehouse' . (!empty($ctx['notes']) ? ' - ' . $ctx['notes'] : ''),
             'created_by' => $_SESSION['user_id'] ?? null,
         ]);
 
-        $locLabel = trim(($ctx['branch_name'] ?? '') . ' Warehouse'
-            . ($zone ? " / Zone {$zone}" : '') . ($rack ? " / Rack {$rack}" : ''));
-        $isDest = !empty($ctx['is_destination']);
         $res = update_shipment_status(
             $shipment_id,
-            $isDest ? 'IN_DESTINATION_WAREHOUSE' : 'IN_ORIGIN_WAREHOUSE',
+            $targetStatus,
             array_merge($ctx, [
                 'warehouse_stock_id' => $wsId,
                 'current_branch_id' => $branch_id,
                 'storage_zone' => $zone ?: null,
-                'storage_rack' => $rack ?: null,
+                'storage_rack' => $storage_location ?: null,
                 'location_label' => $locLabel,
                 'event_type' => $isDest ? 'RECEIVED_AT_DESTINATION_WAREHOUSE' : 'WAREHOUSE_RECEIVED',
                 'notes' => "Stored at {$locLabel}. Quantity received: {$qty}/{$qty}.",
@@ -689,16 +785,39 @@ if (!function_exists('load_shipment_into_container')) {
         $ct->execute([$container_id, $tenantId]);
         $container = $ct->fetch(PDO::FETCH_ASSOC);
         if (!$container) return ['ok' => false, 'message' => 'Container not found.'];
-        // Physical-location guard: a shipment can only be loaded into a container
-        // that is at the same branch. Prevents a supervisor at branch A from
-        // loading cargo physically held at branch B into a local container.
         $shipBranch = (int)($ship['current_branch_id'] ?? $ship['origin_branch_id'] ?? 0);
         $contBranch = (int)($container['current_branch_id'] ?? $container['origin_branch_id'] ?? 0);
         if ($shipBranch > 0 && $contBranch > 0 && $shipBranch !== $contBranch) {
             return ['ok' => false, 'message' => 'Shipment is not physically at this container\'s branch and cannot be loaded here.'];
         }
+        if (in_array((string)$container['status'], ['delivered', 'shipped', 'dispatched', 'at_port', 'ready'], true)) {
+            return ['ok' => false, 'message' => "Container {$container['container_number']} is {$container['status']} and cannot accept new cargo."];
+        }
+        if (container_has_final_trip($container_id, $tenantId)) {
+            return ['ok' => false, 'message' => "Container {$container['container_number']} belongs to a completed/delivered trip and cannot accept new cargo."];
+        }
+        $dup = $pdo->prepare("SELECT id FROM cargo_manifest_items WHERE tenant_id = ? AND container_id = ? AND master_shipment_id = ? LIMIT 1");
+        $dup->execute([$tenantId, $container_id, $shipment_id]);
+        if ($dup->fetchColumn()) {
+            return ['ok' => false, 'message' => 'This shipment is already on this container manifest.'];
+        }
+        if (!empty($ship['current_container_id']) || in_array((string)$ship['current_status'], ['LOADED','DISPATCHED','IN_TRANSIT','ARRIVED_AT_DESTINATION','IN_DESTINATION_WAREHOUSE','READY_FOR_PICKUP','OUT_FOR_DELIVERY','DELIVERED','CLOSED'], true)) {
+            return ['ok' => false, 'message' => 'This shipment is already containerized or beyond the loading stage.'];
+        }
         if ((int)$quantity > (int)$ship['quantity']) {
             return ['ok' => false, 'message' => "Quantity {$quantity} exceeds available {$ship['quantity']}."];
+        }
+        if (empty($ship['current_warehouse_stock_id'])) {
+            return ['ok' => false, 'message' => 'Shipment has no active warehouse stock row to load from.'];
+        }
+        $activeWsStmt = $pdo->prepare("SELECT id, quantity, branch_id, is_active FROM warehouse_stock WHERE id = ? AND tenant_id = ? FOR UPDATE");
+        $activeWsStmt->execute([(int)$ship['current_warehouse_stock_id'], $tenantId]);
+        $activeWs = $activeWsStmt->fetch(PDO::FETCH_ASSOC);
+        if (!$activeWs || (int)$activeWs['is_active'] !== 1 || (int)$activeWs['quantity'] <= 0) {
+            return ['ok' => false, 'message' => 'Shipment is not physically available in warehouse stock.'];
+        }
+        if ((int)$quantity > (int)$activeWs['quantity']) {
+            return ['ok' => false, 'message' => "Quantity {$quantity} exceeds active warehouse availability {$activeWs['quantity']}."];
         }
         // CBM capacity check where the container has a declared size.
         $cbmNeeded = (float)$ship['volume_cbm'] * ((float)$quantity / max(1, (int)$ship['quantity']));
@@ -719,13 +838,15 @@ if (!function_exists('load_shipment_into_container')) {
             $ins = $pdo->prepare("INSERT INTO cargo_manifest_items
                 (tenant_id, container_id, master_shipment_id, stock_name, quantity, cbm_used,
                  weight_kg, added_at, mogadishu_status)
-                VALUES (?,?,?,?,?,?,?,NOW(),'in_warehouse')");
+                VALUES (?,?,?,?,?,?,?,NOW(),'taken')");
             $ins->execute([$tenantId, $container_id, $shipment_id,
                 $ship['cargo_description'], $quantity, $cbmNeeded, (float)$ship['weight_kg']]);
+            $pdo->prepare("UPDATE containers SET status = CASE WHEN status = 'received' THEN 'loading' ELSE status END, updated_at = NOW() WHERE id = ? AND tenant_id = ?")
+                ->execute([$container_id, $tenantId]);
 
             // OUT / LOAD movement from the origin warehouse stock row.
             if (!empty($ship['current_warehouse_stock_id'])) {
-                $wsStmt = $pdo->prepare("SELECT id, quantity FROM warehouse_stock WHERE id = ? AND tenant_id = ? FOR UPDATE");
+                $wsStmt = $pdo->prepare("SELECT id, quantity, zone, bin_location FROM warehouse_stock WHERE id = ? AND tenant_id = ? FOR UPDATE");
                 $wsStmt->execute([(int)$ship['current_warehouse_stock_id'], $tenantId]);
                 $ws = $wsStmt->fetch(PDO::FETCH_ASSOC);
                 if ($ws) {
@@ -738,15 +859,19 @@ if (!function_exists('load_shipment_into_container')) {
                         $uChk->execute([(int)$updBy]);
                         if (!$uChk->fetchColumn()) $updBy = null;
                     }
-                    $sql = "UPDATE warehouse_stock SET quantity = ?, mogadishu_status = 'taken', last_updated = NOW()"
+                    $sql = "UPDATE warehouse_stock SET quantity = ?, mogadishu_status = 'taken', is_active = ?, last_updated = NOW()"
                          . ($updBy !== null ? ", updated_by = " . (int)$updBy : "") . " WHERE id = ?";
-                    $pdo->prepare($sql)->execute([$newQty, $ws['id']]);
+                    $pdo->prepare($sql)->execute([$newQty, $newQty > 0 ? 1 : 0, $ws['id']]);
                     record_stock_movement([
                         'tenant_id' => $tenantId, 'warehouse_stock_id' => $ws['id'],
                         'quantity_change' => -(int)$quantity,
                         'previous_quantity' => (int)$ws['quantity'], 'new_quantity' => $newQty,
                         'movement_type' => 'out',
+                        'movement_event' => 'loaded_to_container',
+                        'from_location' => trim(($ctx['branch_name'] ?? '') . ' Warehouse · ' . (($ws['zone'] ?? '') ?: '-') . ' / ' . (($ws['bin_location'] ?? '') ?: '-')),
+                        'to_location' => $container['container_number'],
                         'reference_type' => 'shipment', 'reference_id' => $shipment_id,
+                        'reference_label' => $container['container_number'],
                         'notes' => "LOAD: Warehouse to Container {$container['container_number']}",
                         'created_by' => $_SESSION['user_id'] ?? null,
                     ]);
@@ -760,6 +885,7 @@ if (!function_exists('load_shipment_into_container')) {
                 'notes' => "Loaded {$quantity} of {$ship['quantity']} into container {$container['container_number']}.",
             ]));
             if (!$res['ok']) { throw new RuntimeException($res['message']); }
+            sync_container_manifest_totals($container_id, $tenantId);
             $pdo->commit();
             return ['ok' => true, 'message' => "Shipment loaded into container {$container['container_number']}."];
         } catch (Throwable $e) {
@@ -820,13 +946,16 @@ if (!function_exists('propagate_trip_status_to_shipments')) {
         }
 
         foreach ($shipments as $s) {
+            $isArrival = $target === 'ARRIVED_AT_DESTINATION';
             update_shipment_status((int)$s['id'], $target, [
                 'tenant_id' => $tenantId,
                 'current_trip_id' => $trip_id,
                 'current_container_id' => (int)$trip['container_id'],
-                'branch_id' => $trip['from_branch_id'] ?? null,
-                'location_label' => !empty($trip['container_number']) ? ('Container ' . $trip['container_number']) : null,
-                'event_type' => 'TRIP_' . strtoupper($trip_status),
+                'branch_id' => $isArrival ? ($trip['to_branch_id'] ?? null) : ($trip['from_branch_id'] ?? null),
+                'location_label' => $isArrival
+                    ? 'Arrived at destination branch'
+                    : (!empty($trip['container_number']) ? ('Container ' . $trip['container_number']) : null),
+                'event_type' => $isArrival ? 'ARRIVED_AT_DESTINATION' : ('TRIP_' . strtoupper($trip_status)),
                 'performed_by' => $ctx['performed_by'] ?? ($_SESSION['user_id'] ?? null),
                 'performer_name' => $ctx['performer_name'] ?? ($_SESSION['user_name'] ?? null),
                 'notes' => 'Trip ' . $trip['trip_number'] . ' - ' . $trip_status,

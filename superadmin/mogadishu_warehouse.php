@@ -24,6 +24,7 @@ if ($role === 'company_admin') {
 }
 
 require_once __DIR__ . '/../config/db_connect.php';
+require_once __DIR__ . '/../includes/sa_scope.php';
 
 // ── Ensure warehouse tables have required columns ───────────────────────────────────────────
 try {
@@ -116,7 +117,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['ajax_action'])) {
     
     // Get warehouse statistics
     if ($action === 'get_stats') {
-        $tenant_filter = ($role === 'superadmin') ? (isset($_POST['tenant']) ? (int)$_POST['tenant'] : 0) : $session_tenant_id;
+        $tenant_filter = ($role === 'superadmin') ? (isset($_POST['tenant']) ? (int)$_POST['tenant'] : sa_selected_tenant_id_int()) : $session_tenant_id;
         $where = ($tenant_filter > 0) ? "AND tenant_id = $tenant_filter" : "";
         if ($role !== 'superadmin') {
             $where = "AND tenant_id = $session_tenant_id";
@@ -169,7 +170,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['ajax_action'])) {
         
         $search = $_POST['search'] ?? '';
         $status_filter = $_POST['status'] ?? '';
-        $tenant_filter = ($role === 'superadmin') ? (isset($_POST['tenant']) ? (int)$_POST['tenant'] : 0) : $session_tenant_id;
+        $tenant_filter = ($role === 'superadmin') ? (isset($_POST['tenant']) ? (int)$_POST['tenant'] : sa_selected_tenant_id_int()) : $session_tenant_id;
         
         $where_conditions = [];
         $params = [];
@@ -498,7 +499,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['ajax_action'])) {
     
     // Get containers list
     elseif ($action === 'get_containers') {
-        $tenant_filter = ($role === 'superadmin') ? (isset($_POST['tenant']) ? (int)$_POST['tenant'] : 0) : $session_tenant_id;
+        $tenant_filter = ($role === 'superadmin') ? (isset($_POST['tenant']) ? (int)$_POST['tenant'] : sa_selected_tenant_id_int()) : $session_tenant_id;
         
         $where = "";
         $params = [];
@@ -542,7 +543,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['ajax_action'])) {
     
     // Get pending shipments (items waiting to arrive)
     elseif ($action === 'get_pending_shipments') {
-        $tenant_filter = ($role === 'superadmin') ? (isset($_POST['tenant']) ? (int)$_POST['tenant'] : 0) : $session_tenant_id;
+        $tenant_filter = ($role === 'superadmin') ? (isset($_POST['tenant']) ? (int)$_POST['tenant'] : sa_selected_tenant_id_int()) : $session_tenant_id;
         
         $where = "";
         $params = [];
@@ -1069,6 +1070,27 @@ require_once __DIR__ . '/../includes/header.php';
 
 <script src="https://code.jquery.com/jquery-3.6.0.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/bootstrap@4.5.2/dist/js/bootstrap.bundle.min.js"></script>
+<script>
+// CSRF-token shim: this page loads its own jQuery inline instead of using
+// includes/footer.php, so the ajaxSetup shim there never runs. Install an
+// equivalent one so every same-origin POST from this page gets X-CSRF-Token.
+(function () {
+    var m = document.querySelector('meta[name="csrf-token"]');
+    if (!m || !window.jQuery) return;
+    var token = m.getAttribute('content') || '';
+    jQuery.ajaxSetup({
+        beforeSend: function (xhr, settings) {
+            var method = (settings.type || 'GET').toUpperCase();
+            if (method === 'GET' || method === 'HEAD' || method === 'OPTIONS') return;
+            if (settings.crossDomain) return;
+            xhr.setRequestHeader('X-CSRF-Token', token);
+            if (settings.data instanceof FormData && !settings.data.has('csrf_token')) {
+                settings.data.append('csrf_token', token);
+            }
+        }
+    });
+})();
+</script>
 
 <script>
 $(document).ready(function() {

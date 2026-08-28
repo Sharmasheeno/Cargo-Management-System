@@ -230,8 +230,16 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['ajax_action'])) {
             if ($remaining === 0) {
                 $pdo->prepare("UPDATE containers SET status = 'delivered', delivered_date = COALESCE(delivered_date, CURDATE()), updated_at = NOW()
                                WHERE id = ? AND tenant_id = ?")->execute([$trip['container_id'], $tenant_id]);
-                $pdo->prepare("UPDATE trucking_trips SET status = 'completed', arrived_at = COALESCE(arrived_at, NOW()), updated_at = NOW()
-                               WHERE id = ? AND tenant_id = ?")->execute([$trip_id, $tenant_id]);
+                // Receiving audit: authoritatively persist the Warehouse Supervisor
+                // who closed the trip. received_by is only set on the transition to
+                // completed so it identifies the actor who took final destination
+                // custody -- separate from the driver's arrival audit and the
+                // Logistics Supervisor's dispatch audit.
+                $pdo->prepare("UPDATE trucking_trips
+                               SET status = 'completed', arrived_at = COALESCE(arrived_at, NOW()),
+                                   received_by = COALESCE(received_by, ?), updated_at = NOW()
+                               WHERE id = ? AND tenant_id = ?")
+                    ->execute([$_SESSION['user_id'] ?? null, $trip_id, $tenant_id]);
             }
 
             $pdo->commit();

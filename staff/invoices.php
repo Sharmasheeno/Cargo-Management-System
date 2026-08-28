@@ -18,11 +18,9 @@ if (!isset($pdo) || !$pdo instanceof PDO) {
 }
 
 // Only staff accounts may access this page.
-// NOTE: login.php stores the sub-role (role_type) into $_SESSION['role'] as an alias, so a
-// plain === 'staff' check only matches the generic staff account and would incorrectly lock
-// out every staff sub-role. Check role_type (falling back to role) against the known staff
-// role_types instead -- same pattern applied to the 4 existing base staff pages.
-$staff_role_types = ['staff', 'warehouse_supervisor', 'logistics_supervisor', 'finance_manager', 'clerk'];
+// See staffFamilyRoleTypes() / staffFinanceRoleTypes() in includes/functions.php.
+require_once __DIR__ . '/../includes/functions.php';
+$staff_role_types = staffFamilyRoleTypes();
 $current_role_type = $_SESSION['role_type'] ?? $_SESSION['role'] ?? '';
 if (!isset($_SESSION['user_id']) || !in_array($current_role_type, $staff_role_types, true)) {
     header("Location: ../login.php");
@@ -30,7 +28,7 @@ if (!isset($_SESSION['user_id']) || !in_array($current_role_type, $staff_role_ty
 }
 
 // Only finance_manager / clerk role_types are permitted on this page
-if (!in_array($current_role_type, ['finance_manager', 'clerk'], true)) {
+if (!in_array($current_role_type, staffFinanceRoleTypes(), true)) {
     header("Location: ../staff/dashboard.php?error=access_denied");
     exit;
 }

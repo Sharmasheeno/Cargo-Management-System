@@ -278,12 +278,16 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['ajax_action'])) {
         $sql = "
             SELECT b.*, 
                    (SELECT COUNT(*) FROM user_branch_assignments uba WHERE uba.branch_id = b.id) as staff_count,
-                   (SELECT u.email FROM users u 
-                    JOIN user_branch_assignments uba ON u.id = uba.user_id 
-                    WHERE uba.branch_id = b.id AND uba.is_primary = 1 LIMIT 1) as manager_email,
-                   (SELECT u.full_name FROM users u 
-                    JOIN user_branch_assignments uba ON u.id = uba.user_id 
-                    WHERE uba.branch_id = b.id AND uba.is_primary = 1 LIMIT 1) as manager_name_assigned
+                   (SELECT u.email FROM users u
+                    JOIN user_branch_assignments uba ON u.id = uba.user_id
+                    WHERE uba.branch_id = b.id AND uba.is_primary = 1
+                      AND u.role_type = 'branch_manager' AND u.is_active = 1
+                    LIMIT 1) as manager_email,
+                   (SELECT u.full_name FROM users u
+                    JOIN user_branch_assignments uba ON u.id = uba.user_id
+                    WHERE uba.branch_id = b.id AND uba.is_primary = 1
+                      AND u.role_type = 'branch_manager' AND u.is_active = 1
+                    LIMIT 1) as manager_name_assigned
             FROM branches b
             $where_clause
             ORDER BY b.created_at DESC
@@ -460,14 +464,27 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['ajax_action'])) {
                 exit;
             }
             
-            // Verify user belongs to this tenant
-            $checkUser = $pdo->prepare("SELECT id FROM users WHERE id = ? AND tenant_id = ?");
+            // Verify user belongs to this tenant, capture role_type for the
+            // is_primary (= branch manager) role gate below.
+            $checkUser = $pdo->prepare("SELECT id, role_type FROM users WHERE id = ? AND tenant_id = ?");
             $checkUser->execute([$user_id, $session_tenant_id]);
-            if (!$checkUser->fetch()) {
+            $userRow = $checkUser->fetch(PDO::FETCH_ASSOC);
+            if (!$userRow) {
                 echo json_encode(['success' => false, 'message' => 'User not found']);
                 exit;
             }
-            
+
+            // Integrity gate: on this screen `is_primary = 1` means "this user
+            // is the branch's Branch Manager". Only users whose authoritative
+            // role_type is already `branch_manager` may hold that flag; we do
+            // NOT silently promote a Reception Clerk / Warehouse Supervisor
+            // / etc. Change the user's role first via User Management, then
+            // assign as primary.
+            if ($is_primary && ($userRow['role_type'] ?? '') !== 'branch_manager') {
+                echo json_encode(['success' => false, 'message' => 'Only a user whose role is Branch Manager can be assigned as the branch\'s primary manager. Change the user\'s role first, then assign.']);
+                exit;
+            }
+
             // Check if assignment already exists
             $check = $pdo->prepare("SELECT id FROM user_branch_assignments WHERE user_id = ? AND branch_id = ?");
             $check->execute([$user_id, $branch_id]);
@@ -475,7 +492,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['ajax_action'])) {
                 echo json_encode(['success' => false, 'message' => 'User already assigned to this branch']);
                 exit;
             }
-            
+
             // If setting as primary, remove primary from other users in this branch
             if ($is_primary) {
                 $stmt = $pdo->prepare("UPDATE user_branch_assignments SET is_primary = 0 WHERE branch_id = ?");
@@ -540,16 +557,27 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['ajax_action'])) {
         $permissions = $_POST['permissions'] ?? null;
         
         try {
-            // Get branch_id for this assignment
-            $stmt = $pdo->prepare("SELECT uba.branch_id, b.tenant_id FROM user_branch_assignments uba JOIN branches b ON uba.branch_id = b.id WHERE uba.id = ? AND b.tenant_id = ?");
+            // Get branch_id + assigned user's role_type for the role gate below.
+            $stmt = $pdo->prepare("SELECT uba.branch_id, b.tenant_id, u.role_type
+                                    FROM user_branch_assignments uba
+                                    JOIN branches b ON uba.branch_id = b.id
+                                    JOIN users u ON u.id = uba.user_id
+                                    WHERE uba.id = ? AND b.tenant_id = ?");
             $stmt->execute([$assignment_id, $session_tenant_id]);
             $assignment = $stmt->fetch(PDO::FETCH_ASSOC);
-            
+
             if (!$assignment) {
                 echo json_encode(['success' => false, 'message' => 'Assignment not found']);
                 exit;
             }
-            
+
+            // Same integrity gate as assign_user_to_branch: only a user whose
+            // authoritative role_type is `branch_manager` may hold is_primary.
+            if ($is_primary && ($assignment['role_type'] ?? '') !== 'branch_manager') {
+                echo json_encode(['success' => false, 'message' => 'Only a user whose role is Branch Manager can be assigned as the branch\'s primary manager. Change the user\'s role first, then assign.']);
+                exit;
+            }
+
             // If setting as primary, remove primary from other users in this branch
             if ($is_primary) {
                 $stmt = $pdo->prepare("UPDATE user_branch_assignments SET is_primary = 0 WHERE branch_id = ? AND id != ?");

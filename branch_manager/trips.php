@@ -271,12 +271,20 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['ajax_action'])) {
 
     if ($action === 'get_trip') {
         $id = postInt('id');
+        // Approver/dispatcher joins are TENANT-scoped so a trip can never
+        // expose a name from another tenant even under an id-swap.
         $stmt = $pdo->prepare("
-            SELECT t.*, c.container_number, fb.branch_name AS from_branch_name, tb.branch_name AS to_branch_name
+            SELECT t.*, c.container_number, fb.branch_name AS from_branch_name, tb.branch_name AS to_branch_name,
+                   ua.full_name AS approver_name, ua.role_type AS approver_role,
+                   ud.full_name AS dispatcher_name, ud.role_type AS dispatcher_role,
+                   ur.full_name AS receiver_name, ur.role_type AS receiver_role
             FROM trucking_trips t
             LEFT JOIN containers c ON t.container_id = c.id
             LEFT JOIN branches fb ON t.from_branch_id = fb.id
             LEFT JOIN branches tb ON t.to_branch_id = tb.id
+            LEFT JOIN users ua ON ua.id = t.approved_by AND ua.tenant_id = t.tenant_id
+            LEFT JOIN users ud ON ud.id = t.dispatched_by AND ud.tenant_id = t.tenant_id
+            LEFT JOIN users ur ON ur.id = t.received_by AND ur.tenant_id = t.tenant_id
             WHERE t.id = ? AND t.tenant_id = ? AND (t.branch_id = ? OR t.from_branch_id = ? OR t.to_branch_id = ?)
             LIMIT 1
         ");
@@ -284,17 +292,55 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['ajax_action'])) {
         $trip = $stmt->fetch(PDO::FETCH_ASSOC);
         if (!$trip) jsonOut(['success' => false, 'message' => 'Trip not found or not in your branch.']);
 
+        $roleDisplay = function(?string $rt): string {
+            $map = [
+                'branch_manager' => 'Branch Manager',
+                'logistics_supervisor' => 'Logistics Supervisor',
+                'warehouse_supervisor' => 'Warehouse Supervisor',
+                'reception_clerk' => 'Reception Clerk',
+                'finance_manager' => 'Finance Manager',
+                'delivery_agent' => 'Courier',
+                'driver' => 'Driver',
+                'clerk' => 'Assistant Worker',
+                'tenant_admin' => 'Tenant Admin',
+                'superadmin' => 'Super Admin',
+            ];
+            return $map[(string)$rt] ?? ucwords(str_replace('_', ' ', (string)$rt));
+        };
+        $__appr = (string)($trip['approval_status'] ?? 'not_required');
+        $__approvalLabels = ['not_required'=>'Not required','pending_approval'=>'Awaiting Approval','approved'=>'Approved','rejected'=>'Rejected'];
+
         global $trip_status_labels;
         ob_start(); ?>
         <div class="mb-2"><strong>Trip:</strong> <?= h($trip['trip_number']) ?></div>
         <div class="mb-2"><strong>Container:</strong> <?= h($trip['container_number'] ?? '-') ?></div>
         <div class="mb-2"><strong>Status:</strong> <?= h($trip_status_labels[$trip['status']] ?? $trip['status']) ?></div>
+        <div class="mb-2"><strong>Approval:</strong> <?= h($__approvalLabels[$__appr] ?? $__appr) ?></div>
+        <?php if ($__appr === 'approved' && !empty($trip['approved_by'])): ?>
+            <div class="mb-2"><strong>Approved By:</strong> <?= h(($trip['approver_name'] ?? '(user removed)')) ?> &mdash; <?= h($roleDisplay($trip['approver_role'] ?? '')) ?></div>
+            <div class="mb-2"><strong>Approved At:</strong> <?= h($trip['approved_at'] ?? '-') ?></div>
+        <?php elseif ($__appr === 'rejected' && !empty($trip['approved_by'])): ?>
+            <div class="mb-2"><strong>Rejected By:</strong> <?= h(($trip['approver_name'] ?? '(user removed)')) ?> &mdash; <?= h($roleDisplay($trip['approver_role'] ?? '')) ?></div>
+            <div class="mb-2"><strong>Rejected At:</strong> <?= h($trip['approved_at'] ?? '-') ?></div>
+        <?php endif; ?>
         <div class="mb-2"><strong>Route:</strong> <?= h($trip['from_branch_name'] ?? '-') ?> &rarr; <?= h($trip['to_branch_name'] ?? '-') ?></div>
         <div class="mb-2"><strong>Driver:</strong> <?= h($trip['driver_name'] ?? '-') ?> <?= h($trip['driver_phone'] ?? '') ?></div>
         <div class="mb-2"><strong>Truck Plate:</strong> <?= h($trip['truck_plate'] ?? '-') ?></div>
         <div class="mb-2"><strong>Total CBM:</strong> <?= number_format((float)($trip['total_cbm'] ?? 0), 2) ?></div>
         <div class="mb-2"><strong>Loaded At:</strong> <?= h($trip['loaded_at'] ?? '-') ?></div>
         <div class="mb-2"><strong>Departed At:</strong> <?= h($trip['departed_at'] ?? '-') ?></div>
+        <?php if (!empty($trip['dispatched_by'])): ?>
+            <div class="mb-2"><strong>Dispatched By:</strong> <?= h(($trip['dispatcher_name'] ?? '(user removed)')) ?> &mdash; <?= h($roleDisplay($trip['dispatcher_role'] ?? '')) ?></div>
+        <?php elseif (!empty($trip['departed_at'])): ?>
+            <div class="mb-2 text-muted"><small><em>Dispatcher not recorded (departed before the audit column existed).</em></small></div>
+        <?php endif; ?>
+        <?php if (!empty($trip['arrived_at'])): ?>
+            <div class="mb-2"><strong>Arrived At:</strong> <?= h($trip['arrived_at']) ?></div>
+        <?php endif; ?>
+        <?php if (!empty($trip['received_by'])): ?>
+            <div class="mb-2"><strong>Received By:</strong> <?= h(($trip['receiver_name'] ?? '(user removed)')) ?> &mdash; <?= h($roleDisplay($trip['receiver_role'] ?? '')) ?></div>
+            <div class="mb-2"><strong>Completed At:</strong> <?= h($trip['arrived_at'] ?? '-') ?></div>
+        <?php endif; ?>
         <div class="mb-2"><strong>Delivered At:</strong> <?= h($trip['delivered_at'] ?? '-') ?></div>
         <div class="mb-2"><strong>Notes:</strong> <?= nl2br(h($trip['notes'] ?? '-')) ?></div>
         <?php

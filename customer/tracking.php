@@ -1,14 +1,7 @@
 <?php
 // customer/tracking.php
-if (session_status() === PHP_SESSION_NONE) session_start();
-if (!isset($_SESSION['user_id']) || $_SESSION['role'] !== 'customer') {
-    header("Location: ../login.php");
-    exit;
-}
-
-require_once __DIR__ . '/../config/db_connect.php';
+require_once __DIR__ . '/_auth.php';
 require_once __DIR__ . '/../includes/shipment_functions.php';
-$user_id = $_SESSION['user_id'];
 
 // Get Customer ID
 $stmt = $pdo->prepare("SELECT id FROM customers WHERE user_id = ?");
@@ -24,9 +17,9 @@ $shipStmt = $pdo->prepare("
     FROM shipments s
     LEFT JOIN branches ob ON ob.id = s.origin_branch_id
     LEFT JOIN branches db ON db.id = s.destination_branch_id
-    WHERE s.customer_id = ? AND s.is_active = 1
+    WHERE s.customer_id = ? AND s.tenant_id = ? AND s.is_active = 1
     ORDER BY s.created_at DESC");
-$shipStmt->execute([$customer_id]);
+$shipStmt->execute([$customer_id, $session_tenant_id]);
 $my_shipments = $shipStmt->fetchAll(PDO::FETCH_ASSOC);
 
 // Latest public events per shipment (simplified customer timeline)
@@ -44,10 +37,10 @@ $stmt = $pdo->prepare("
     FROM warehouse_stock ws
     LEFT JOIN cargo_manifest_items cmi ON ws.id = cmi.warehouse_stock_id
     LEFT JOIN containers c ON cmi.container_id = c.id
-    WHERE ws.customer_id = ? AND ws.shipment_id IS NULL
+    WHERE ws.customer_id = ? AND ws.tenant_id = ? AND ws.shipment_id IS NULL
     ORDER BY ws.last_updated DESC
 ");
-$stmt->execute([$customer_id]);
+$stmt->execute([$customer_id, $session_tenant_id]);
 $packages = $stmt->fetchAll(PDO::FETCH_ASSOC);
 
 require_once __DIR__ . '/../includes/header.php';

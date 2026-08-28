@@ -28,7 +28,6 @@ if (!empty($tracking_number)) {
         $shipment_view = ['shipment' => $shipRow, 'events' => $shipEvents];
     }
 }
-?>
 
 // Get shipment by ID or tracking number
 if ($tracking_id > 0) {
@@ -48,7 +47,7 @@ if ($tracking_id > 0) {
     ");
     $stmt->execute([$tracking_id]);
     $shipment = $stmt->fetch(PDO::FETCH_ASSOC);
-} elseif (!empty($tracking_number)) {
+} elseif (!empty($tracking_number) && !$shipment_view) {
     $stmt = $pdo->prepare("
         SELECT t.*, 
                c.container_number, c.container_type, c.origin, c.size_cbm, c.weight_kg, c.seal_number,
@@ -72,23 +71,9 @@ if (!$shipment) {
     $error = "Safarka ama Lambarka Raadraaca lama helin. Fadlan hubi lambarka oo isku day mar kale.";
 }
 
-// Get cargo manifest items for this shipment
+// Public tracking never loads or renders internal manifest lines, warehouse
+// stock pricing, unit costs, or financial totals.
 $cargo_items = [];
-if ($shipment) {
-    try {
-        $stmt = $pdo->prepare("
-            SELECT cmi.*, ws.stock_name as ws_stock_name, ws.unit_price as ws_unit_price
-            FROM cargo_manifest_items cmi
-            LEFT JOIN warehouse_stock ws ON cmi.warehouse_stock_id = ws.id
-            WHERE cmi.shipment_id = ?
-            ORDER BY cmi.added_at DESC
-        ");
-        $stmt->execute([$shipment['id']]);
-        $cargo_items = $stmt->fetchAll(PDO::FETCH_ASSOC);
-    } catch (PDOException $e) {
-        $cargo_items = [];
-    }
-}
 
 // Status names and icons
 $status_info = [

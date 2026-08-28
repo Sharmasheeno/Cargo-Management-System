@@ -3,30 +3,7 @@
 // Payment Management forfaras cargo - Customer/Tenant Admin View
 // Complete Refactored Version - All-in-One File
 
-if (session_status() === PHP_SESSION_NONE) {
-    session_start();
-}
-
-// Check if user is logged in and is tenant_admin or customer
-$allowed_roles = ['tenant_admin', 'company_admin', 'customer'];
-if (!isset($_SESSION['user_id']) || !in_array($_SESSION['role'] ?? '', $allowed_roles)) {
-    header("Location: ../login.php");
-    exit;
-}
-
-$role = $_SESSION['role'];
-$session_tenant_id = $_SESSION['tenant_id'] ?? 0;
-$user_id = $_SESSION['user_id'];
-$user_name = $_SESSION['user_name'] ?? 'User';
-$customer_id = $_SESSION['customer_id'] ?? null;
-
-// Security: If tenant admin without tenant, redirect
-if (($role === 'tenant_admin' || $role === 'company_admin') && !$session_tenant_id) {
-    header("Location: ../dashboard.php?error=no_tenant");
-    exit;
-}
-
-require_once __DIR__ . '/../config/db_connect.php';
+require_once __DIR__ . '/_auth.php';
 require_once __DIR__ . '/../includes/audit_helper.php';
 
 // Check if AccountingService exists
@@ -109,21 +86,40 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['ajax_action'])) {
                 handleGetPayment($pdo, $role, $session_tenant_id, $customer_id);
                 break;
             case 'save_payment':
+                if ($role === 'customer') {
+                    echo json_encode(['success' => false, 'message' => 'Payments are read-only in the customer portal.']);
+                    break;
+                }
                 handleSavePayment($pdo, $role, $session_tenant_id, $customer_id, $user_id);
                 break;
             case 'delete_payment':
+                if ($role === 'customer') {
+                    echo json_encode(['success' => false, 'message' => 'Customers cannot delete payments.']);
+                    break;
+                }
                 handleDeletePayment($pdo, $role, $session_tenant_id, $customer_id);
                 break;
             case 'get_stats':
                 handleGetStats($pdo, $role, $session_tenant_id, $customer_id);
                 break;
             case 'generate_payment_number':
+                if ($role === 'customer') {
+                    echo json_encode(['success' => false, 'message' => 'Customers cannot generate payment numbers.']);
+                    break;
+                }
                 handleGeneratePaymentNumber($pdo, $session_tenant_id);
                 break;
             case 'get_customers_by_tenant':
+                if ($role === 'customer') {
+                    echo json_encode(['success' => false, 'message' => 'Customers cannot list tenant customers.']);
+                    break;
+                }
                 handleGetCustomersByTenant($pdo, $role, $session_tenant_id, $customer_id);
                 break;
             case 'get_invoices_by_customer':
+                if ($role === 'customer') {
+                    $_POST['customer_id'] = (string)$customer_id;
+                }
                 handleGetInvoicesByCustomer($pdo, $session_tenant_id);
                 break;
             case 'get_my_payments':

@@ -12,14 +12,19 @@ if (session_status() === PHP_SESSION_NONE) {
 }
 
 // Only staff accounts may access this page.
-// NOTE: login.php stores the sub-role (role_type) into $_SESSION['role'] as an alias, so a
-// plain === 'staff' check only matches the generic staff account and locks out every staff
-// sub-role (warehouse_supervisor, logistics_supervisor, finance_manager, clerk). Check
-// against the known staff role_types instead, using role_type first, role as fallback.
-$staff_role_types = ['staff', 'reception_clerk', 'warehouse_supervisor', 'logistics_supervisor', 'finance_manager', 'clerk'];
+// See staffFamilyRoleTypes() in includes/functions.php.
+require_once __DIR__ . '/../includes/functions.php';
+$staff_role_types = staffFamilyRoleTypes();
+$current_role_type = $_SESSION['role_type'] ?? $_SESSION['role'] ?? '';
 
-if (!isset($_SESSION['user_id']) || !in_array($_SESSION['role_type'] ?? $_SESSION['role'] ?? '', $staff_role_types, true)) {
+if (!isset($_SESSION['user_id']) || !in_array($current_role_type, $staff_role_types, true)) {
     header("Location: ../login.php");
+    exit;
+}
+if (!in_array($current_role_type, staffReceptionRoleTypes(), true)) {
+    $_SESSION['flash_message'] = 'You do not have permission to access Receptions.';
+    $_SESSION['flash_type'] = 'error';
+    header("Location: ../staff/dashboard.php?error=access_denied");
     exit;
 }
 
@@ -34,30 +39,40 @@ if ($tenant_id <= 0) {
 }
 
 // ── Resolve the staff member's assigned branch ──────────────────────────────
-$assigned_branch_id = $_SESSION['assigned_branch_id'] ?? null;
+$assigned_branch_id = null;
+
+// Resolve this from authoritative assignment data for every request.  A
+// session value may be stale after an administrator changes a staff member's
+// branch, so it must not determine the origin of a newly received shipment.
+try {
+    $stmt = $pdo->prepare("
+        SELECT uba.branch_id, uba.can_manage_branch
+        FROM user_branch_assignments uba
+        INNER JOIN branches b ON b.id = uba.branch_id
+        WHERE uba.user_id = ? AND uba.is_primary = 1
+          AND b.tenant_id = ? AND b.is_active = 1
+        LIMIT 1
+    ");
+    $stmt->execute([$user_id, $tenant_id]);
+    $branchAssign = $stmt->fetch(PDO::FETCH_ASSOC);
+    if ($branchAssign) {
+        $assigned_branch_id = (int)$branchAssign['branch_id'];
+        $_SESSION['assigned_branch_id'] = $assigned_branch_id;
+        $_SESSION['can_manage_branch'] = $branchAssign['can_manage_branch'];
+    }
+} catch (PDOException $e) {}
 
 if (!$assigned_branch_id) {
     try {
         $stmt = $pdo->prepare("
-            SELECT branch_id, is_primary, can_manage_branch
-            FROM user_branch_assignments
-            WHERE user_id = ? AND is_primary = 1
+            SELECT u.default_branch_id
+            FROM users u
+            INNER JOIN branches b ON b.id = u.default_branch_id
+            WHERE u.id = ? AND u.tenant_id = ?
+              AND b.tenant_id = ? AND b.is_active = 1
             LIMIT 1
         ");
-        $stmt->execute([$user_id]);
-        $branchAssign = $stmt->fetch(PDO::FETCH_ASSOC);
-        if ($branchAssign) {
-            $assigned_branch_id = $branchAssign['branch_id'];
-            $_SESSION['assigned_branch_id'] = $assigned_branch_id;
-            $_SESSION['can_manage_branch'] = $branchAssign['can_manage_branch'];
-        }
-    } catch (PDOException $e) {}
-}
-
-if (!$assigned_branch_id) {
-    try {
-        $stmt = $pdo->prepare("SELECT default_branch_id FROM users WHERE id = ?");
-        $stmt->execute([$user_id]);
+        $stmt->execute([$user_id, $tenant_id, $tenant_id]);
         $userBranch = $stmt->fetch(PDO::FETCH_ASSOC);
         if ($userBranch && $userBranch['default_branch_id']) {
             $assigned_branch_id = $userBranch['default_branch_id'];
@@ -116,6 +131,17 @@ try {
     $t = $stmt->fetch(PDO::FETCH_ASSOC);
     if ($t) $tenant_name = $t['name'];
 } catch (PDOException $e) {}
+
+// Other branches this tenant can ship to (excludes the receptionist's own
+// branch, which is always the implicit origin for a reception intake).
+$destination_branches = [];
+try {
+    $stmt = $pdo->prepare("SELECT id, branch_name, branch_code FROM branches WHERE tenant_id = ? AND id != ? AND is_active = 1 ORDER BY branch_name ASC");
+    $stmt->execute([$tenant_id, $assigned_branch_id]);
+    $destination_branches = $stmt->fetchAll(PDO::FETCH_ASSOC);
+} catch (PDOException $e) {}
+
+$quantity_units = ['cartons' => 'Cartons', 'boxes' => 'Boxes', 'bags' => 'Bags', 'pieces' => 'Pieces', 'pallets' => 'Pallets'];
 
 $package_types = ['document' => 'Document', 'parcel' => 'Parcel', 'cargo' => 'Cargo', 'pallet' => 'Pallet', 'container' => 'Container'];
 $status_labels = [
@@ -238,7 +264,19 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['ajax_action'])) {
             $total = (int)$count_stmt->fetch(PDO::FETCH_ASSOC)['total'];
             $total_pages = max(1, (int)ceil($total / $limit));
 
-            $stmt = $pdo->prepare("SELECT p.* FROM packages p $where_clause ORDER BY p.created_at DESC, p.id DESC LIMIT $limit OFFSET $offset");
+            // Resolve the authoritative route from the linked master shipment
+            // (branch IDs) rather than trusting only the legacy free-text
+            // origin/destination columns on `packages`, which are optional
+            // trade-lane notes and are usually left blank.
+            $stmt = $pdo->prepare("
+                SELECT p.*, ob.branch_name AS origin_branch_name, db.branch_name AS destination_branch_name
+                FROM packages p
+                LEFT JOIN shipments s ON s.id = p.shipment_id AND s.tenant_id = p.tenant_id
+                LEFT JOIN branches ob ON ob.id = s.origin_branch_id AND ob.tenant_id = p.tenant_id
+                LEFT JOIN branches db ON db.id = s.destination_branch_id AND db.tenant_id = p.tenant_id
+                $where_clause
+                ORDER BY p.created_at DESC, p.id DESC LIMIT $limit OFFSET $offset
+            ");
             $stmt->execute($params);
             $rows = $stmt->fetchAll(PDO::FETCH_ASSOC);
 
@@ -257,7 +295,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['ajax_action'])) {
                             <td><?= h($r['package_name']) ?></td>
                             <td><?= h($package_types[$r['package_type']] ?? ucfirst($r['package_type'])) ?></td>
                             <td><?= money2($r['weight_kg']) ?> kg<br><small class="text-muted"><?= number_format((float)$r['volume_cbm'], 4) ?> CBM</small></td>
-                            <td><?= h($r['origin'] ?: '-') ?> &rarr; <?= h($r['destination'] ?: '-') ?></td>
+                            <td><?= h($r['origin_branch_name'] ?: ($r['origin'] ?: '—')) ?> &rarr; <?= h($r['destination_branch_name'] ?: ($r['destination'] ?: '—')) ?></td>
                             <td><span class="badge" style="background:<?= $status_colors[$r['status']] ?? '#6b7280' ?>22;color:<?= $status_colors[$r['status']] ?? '#6b7280' ?>;padding:5px 10px;border-radius:999px;font-weight:600;"><?= h($status_labels[$r['status']] ?? ucfirst($r['status'])) ?></span></td>
                             <td><?= $r['received_date'] ? h(date('Y-m-d', strtotime($r['received_date']))) : h(date('Y-m-d', strtotime($r['created_at']))) ?></td>
                             <td class="action-buttons">
@@ -327,7 +365,49 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['ajax_action'])) {
             if (!array_key_exists($status, $status_labels)) $status = 'received';
             $notes = trim($_POST['notes'] ?? '');
 
-            if ($package_name === '') throw new Exception('Package name is required');
+            // --- Master shipment fields (receiver identity, quantity, routing) ---
+            $receiver_name = trim($_POST['receiver_name'] ?? '');
+            $receiver_phone = trim($_POST['receiver_phone'] ?? '');
+            $quantity = (int)($_POST['quantity'] ?? 0);
+            $quantity_unit = $_POST['quantity_unit'] ?? '';
+            if (!array_key_exists($quantity_unit, $quantity_units)) $quantity_unit = '';
+            $delivery_method = ($_POST['delivery_method'] ?? 'branch_pickup') === 'door_delivery' ? 'door_delivery' : 'branch_pickup';
+            $destination_branch_id = !empty($_POST['destination_branch_id']) ? (int)$_POST['destination_branch_id'] : null;
+
+            if ($package_name === '') throw new Exception('Cargo description is required');
+            if (!$customer_id && $customer_name === '') throw new Exception('Customer / sender is required');
+            if ($receiver_name === '') throw new Exception('Receiver name is required');
+            if ($receiver_phone === '') throw new Exception('Receiver phone is required');
+            if ($quantity <= 0) throw new Exception('Quantity must be greater than zero');
+            if ($weight_kg < 0) throw new Exception('Weight cannot be negative');
+
+            // The origin branch is NEVER taken from client input (the visible
+            // field is disabled/read-only and the hidden origin_branch_id
+            // field is display-only, not trusted) - it is always the
+            // receptionist's own session-assigned branch. This is the only
+            // origin a Reception Clerk can ever create cargo from.
+            $origin_branch_id = (int)$assigned_branch_id;
+
+            // New receptions are inter-branch shipments: a destination branch is
+            // required and must be validated server-side against the real
+            // branches table - never trust a client-supplied id blindly, since
+            // it could be tampered with (wrong tenant, inactive, nonexistent,
+            // or the receptionist's own branch).
+            if ($id === '') {
+                if (!$destination_branch_id) throw new Exception('Destination branch is required');
+                if ($destination_branch_id === $origin_branch_id) throw new Exception('Destination branch must be different from the origin branch');
+
+                $destCheck = $pdo->prepare("SELECT id FROM branches WHERE id = ? AND tenant_id = ? AND is_active = 1 LIMIT 1");
+                $destCheck->execute([$destination_branch_id, $tenant_id]);
+                if (!$destCheck->fetch()) throw new Exception('Selected destination branch is invalid or not available for this company');
+            }
+
+            // The `packages` table has no dedicated quantity/unit column (legacy
+            // schema) - the authoritative value lives on the master shipment
+            // (shipments.quantity). Record the human-readable quantity here too
+            // so it's not lost from the reception's own notes/audit trail.
+            $quantity_summary = $quantity . ($quantity_unit !== '' ? ' ' . $quantity_units[$quantity_unit] : ' unit(s)');
+            $notes = trim('Quantity: ' . $quantity_summary . ($notes !== '' ? "\n" . $notes : ''));
 
             if ($volume_cbm <= 0 && $length_cm > 0 && $width_cm > 0 && $height_cm > 0) {
                 $volume_cbm = ($length_cm * $width_cm * $height_cm) / 1000000;
@@ -346,6 +426,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['ajax_action'])) {
             }
 
             if ($id === '') {
+                // Schema setup may issue DDL (which implicitly commits in
+                // MySQL), so it must finish before the atomic package + master
+                // shipment insert starts.
+                require_once __DIR__ . '/../includes/shipment_functions.php';
+                ensureShipmentSchema($pdo);
+                $pdo->beginTransaction();
                 $tracking_number = generateReceptionTrackingNumber($pdo, $assigned_branch_id);
                 $received_date = in_array($status, ['received', 'in_transit', 'warehouse', 'out_for_delivery', 'delivered'], true) ? date('Y-m-d H:i:s') : null;
                 $delivered_date = $status === 'delivered' ? date('Y-m-d H:i:s') : null;
@@ -369,26 +455,33 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['ajax_action'])) {
                 // --- Connected A→Z workflow: give every intake a master shipment
                 // identity (SHP-xxxx + DEMO-MGQ-1001 style tracking) so reception,
                 // warehouse, containers, trips and customer tracking all stay linked.
-                require_once __DIR__ . '/../includes/shipment_functions.php';
-                ensureShipmentSchema($pdo);
-                create_shipment_from_reception(
+                $shipment_id = create_shipment_from_reception(
                     array_merge($_POST, [
                         'id' => $new_package_id,
                         'customer_id' => $customer_id ?: null,
                         'customer_name' => $customer_name,
                         'customer_phone' => $customer_phone,
+                        'receiver_name' => $receiver_name,
+                        'receiver_phone' => $receiver_phone,
                         'package_name' => $package_name,
                         'package_type' => $package_type,
+                        'quantity' => $quantity,
                         'weight_kg' => $weight_kg,
                         'volume_cbm' => $volume_cbm,
                         'declared_value' => $declared_value,
+                        'delivery_method' => $delivery_method,
                         'status' => $status,
                         'current_location' => $branch_name,
                     ]),
                     $tenant_id,
-                    $assigned_branch_id,
-                    (int)($_POST['destination_branch_id'] ?? 0) ?: null
+                    $origin_branch_id,
+                    $destination_branch_id
                 );
+                if ($shipment_id <= 0) {
+                    throw new Exception('Reception could not be linked to its master shipment');
+                }
+
+                $pdo->commit();
 
                 json_response(['success' => true, 'message' => "Reception '$tracking_number' recorded successfully", 'id' => $new_package_id]);
 
@@ -440,6 +533,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['ajax_action'])) {
 
         json_response(['success' => false, 'message' => 'Unknown action']);
     } catch (Throwable $e) {
+        if ($pdo->inTransaction()) $pdo->rollBack();
         json_response(['success' => false, 'message' => $e->getMessage()]);
     }
 }
@@ -474,6 +568,71 @@ require_once __DIR__ . '/../includes/header.php';
     .reception-page .action-buttons { white-space: nowrap; }
     .reception-page .modal-header { background: linear-gradient(135deg, var(--curdun-violet), var(--curdun-violet-light)); color: #fff; border-bottom: none; }
     .reception-page .modal-header .close { color: #fff; opacity: .85; }
+    /* Record Reception modal: fixed comfortable width, capped height, only
+       the body scrolls - header and footer (Save/Cancel) always stay put.
+       #receptionForm sits directly inside .modal-content as a sibling of
+       .modal-header, and .modal-body/.modal-footer are children of THAT
+       form, not of .modal-content - so the form itself must be included in
+       the flex chain, or .modal-body's flex/overflow rules have no effect
+       (its real parent, the form, was a plain block element). min-height:0
+       is required on every link in the chain, or a flex item's default
+       auto min-height stops it from ever shrinking enough to scroll. */
+    #receptionModal .modal-dialog.modal-dialog-scrollable {
+        width: min(1080px, 96vw);
+        max-width: min(1080px, 96vw);
+        max-height: 90vh;
+    }
+    #receptionModal .modal-content {
+        max-height: 90vh;
+        display: flex;
+        flex-direction: column;
+        overflow: hidden;
+        min-height: 0;
+    }
+    #receptionModal .modal-content > #receptionForm {
+        display: flex;
+        flex-direction: column;
+        flex: 1 1 auto;
+        min-height: 0;
+        overflow: hidden;
+    }
+    #receptionModal .modal-header { flex: 0 0 auto; }
+    #receptionModal .modal-body {
+        flex: 1 1 auto;
+        min-height: 0;
+        overflow-y: auto !important;
+        overflow-x: hidden;
+        overscroll-behavior: contain;
+        padding-right: 12px;
+        padding-bottom: 20px;
+    }
+    #receptionModal .modal-body::-webkit-scrollbar { width: 8px; }
+    #receptionModal .modal-body::-webkit-scrollbar-thumb { background: #c7c7c7; border-radius: 8px; }
+    #receptionModal .modal-footer {
+        flex: 0 0 auto;
+        background: #fff;
+        border-top: 1px solid #eee;
+        z-index: 5;
+    }
+
+    /* Field layout: explicit CSS grid (not Bootstrap's row/col) so the
+       breakpoints below are exact, independent of Bootstrap's own grid tiers. */
+    .reception-grid {
+        display: grid;
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+        gap: 14px 16px;
+        margin-bottom: 14px;
+    }
+    .reception-grid .span-2 { grid-column: span 2; }
+    .reception-grid .span-3 { grid-column: span 3; }
+    @media (max-width: 900px) {
+        .reception-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+        .reception-grid .span-2, .reception-grid .span-3 { grid-column: span 2; }
+    }
+    @media (max-width: 600px) {
+        .reception-grid { grid-template-columns: minmax(0, 1fr); }
+        .reception-grid .span-2, .reception-grid .span-3 { grid-column: span 1; }
+    }
     .reception-page .form-group label { font-size: 12px; font-weight: 700; color: #374151; margin-bottom: 5px; display: block; }
     .reception-page .form-control { border-radius: 10px; border: 1px solid #d1d5db; padding: 8px 12px; font-size: 13px; }
     .reception-page .customer-search-box { position: relative; }
@@ -525,71 +684,106 @@ require_once __DIR__ . '/../includes/header.php';
 
 <!-- Add/Edit Reception Modal -->
 <div class="modal fade" id="receptionModal" tabindex="-1">
-    <div class="modal-dialog modal-lg">
+    <div class="modal-dialog modal-lg modal-dialog-scrollable">
         <div class="modal-content">
             <div class="modal-header"><h5 class="modal-title" id="receptionModalLabel"><i class="fas fa-clipboard-check"></i> Record Reception</h5><button type="button" class="close" data-dismiss="modal">&times;</button></div>
             <form id="receptionForm">
                 <div class="modal-body">
                     <input type="hidden" name="reception_id" id="reception_id">
-                    <div class="row">
-                        <div class="col-md-6">
-                            <div class="form-group customer-search-box">
-                                <label>Customer <button type="button" id="quickAddCustomerBtn" class="btn btn-sm btn-outline-primary">+ Add New</button></label>
-                                <input type="hidden" name="customer_id" id="modalCustomerId">
-                                <input type="text" id="modalCustomerSearch" class="form-control" autocomplete="off" placeholder="Search by name or phone...">
-                                <div id="modalCustomerResults" class="customer-search-results"></div>
-                                <small id="modalCustomerInfo" class="text-muted d-block mt-1">No customer selected.</small>
-                            </div>
+
+                    <!-- Customer / sender and receiver identity -->
+                    <div class="reception-grid">
+                        <div class="form-group customer-search-box">
+                            <label>Customer / Sender <span class="text-danger">*</span> <button type="button" id="quickAddCustomerBtn" class="btn btn-sm btn-outline-primary">+ Add New</button></label>
+                            <input type="hidden" name="customer_id" id="modalCustomerId">
+                            <input type="text" id="modalCustomerSearch" class="form-control" autocomplete="off" placeholder="Search by name or phone...">
+                            <div id="modalCustomerResults" class="customer-search-results"></div>
+                            <small id="modalCustomerInfo" class="text-muted d-block mt-1">No customer selected.</small>
                         </div>
-                        <div class="col-md-6">
-                            <div class="form-group">
-                                <label>Package Name <span class="text-danger">*</span></label>
-                                <input type="text" name="package_name" id="modalPackageName" class="form-control" placeholder="e.g. Box of clothing, 2 cartons...">
-                            </div>
+                        <div class="form-group">
+                            <label>Receiver Name <span class="text-danger">*</span></label>
+                            <input type="text" name="receiver_name" id="modalReceiverName" class="form-control" placeholder="e.g. Maxamed" required>
                         </div>
-                        <div class="col-md-4">
-                            <div class="form-group">
-                                <label>Package Type</label>
-                                <select name="package_type" id="modalPackageType" class="form-control">
-                                    <?php foreach ($package_types as $k => $v): ?><option value="<?= h($k) ?>"><?= h($v) ?></option><?php endforeach; ?>
-                                </select>
-                            </div>
+                        <div class="form-group">
+                            <label>Receiver Phone <span class="text-danger">*</span></label>
+                            <input type="text" name="receiver_phone" id="modalReceiverPhone" class="form-control" placeholder="e.g. 631111111" required>
                         </div>
-                        <div class="col-md-4">
-                            <div class="form-group">
-                                <label>Status</label>
-                                <select name="status" id="modalStatus" class="form-control">
-                                    <?php foreach ($status_labels as $k => $v): ?><option value="<?= h($k) ?>" <?= $k === 'received' ? 'selected' : '' ?>><?= h($v) ?></option><?php endforeach; ?>
-                                </select>
-                            </div>
+                    </div>
+
+                    <!-- Cargo details -->
+                    <div class="reception-grid">
+                        <div class="form-group span-2">
+                            <label>Cargo Description <span class="text-danger">*</span></label>
+                            <input type="text" name="package_name" id="modalPackageName" class="form-control" placeholder="e.g. Clothes">
                         </div>
-                        <div class="col-md-4">
-                            <div class="form-group">
-                                <label>Weight (kg)</label>
-                                <input type="number" step="0.01" min="0" name="weight_kg" id="modalWeight" class="form-control" value="0">
-                            </div>
+                        <div class="form-group">
+                            <label>Package Type</label>
+                            <select name="package_type" id="modalPackageType" class="form-control">
+                                <?php foreach ($package_types as $k => $v): ?><option value="<?= h($k) ?>"><?= h($v) ?></option><?php endforeach; ?>
+                            </select>
                         </div>
-                        <div class="col-md-3">
-                            <div class="form-group"><label>Length (cm)</label><input type="number" step="0.1" min="0" name="length_cm" id="modalLength" class="form-control dimension-input" value="0"></div>
+                        <div class="form-group">
+                            <label>Quantity <span class="text-danger">*</span></label>
+                            <input type="number" step="1" min="1" name="quantity" id="modalQuantity" class="form-control" value="1" required>
                         </div>
-                        <div class="col-md-3">
-                            <div class="form-group"><label>Width (cm)</label><input type="number" step="0.1" min="0" name="width_cm" id="modalWidth" class="form-control dimension-input" value="0"></div>
+                        <div class="form-group">
+                            <label>Quantity Unit</label>
+                            <select name="quantity_unit" id="modalQuantityUnit" class="form-control">
+                                <?php foreach ($quantity_units as $k => $v): ?><option value="<?= h($k) ?>"><?= h($v) ?></option><?php endforeach; ?>
+                            </select>
                         </div>
-                        <div class="col-md-3">
-                            <div class="form-group"><label>Height (cm)</label><input type="number" step="0.1" min="0" name="height_cm" id="modalHeight" class="form-control dimension-input" value="0"></div>
+                        <div class="form-group">
+                            <label>Weight (kg)</label>
+                            <input type="number" step="0.01" min="0" name="weight_kg" id="modalWeight" class="form-control" value="0">
                         </div>
-                        <div class="col-md-3">
-                            <div class="form-group"><label>Volume (CBM)</label><input type="number" step="0.0001" min="0" name="volume_cbm" id="modalVolume" class="form-control" value="0" placeholder="Auto or manual"></div>
+                    </div>
+
+                    <!-- Routing -->
+                    <div class="reception-grid">
+                        <div class="form-group">
+                            <label>Origin Branch</label>
+                            <input type="text" class="form-control" value="<?= h($branch_name) ?>" disabled>
+                            <!-- Disabled inputs are never submitted by the browser - carry the
+                                 same value via a hidden field so it's visible in the POST payload.
+                                 NOT trusted server-side: the handler always re-derives the real
+                                 origin from $assigned_branch_id (session), never from this field,
+                                 so tampering with it client-side cannot spoof another branch. -->
+                            <input type="hidden" name="origin_branch_id" value="<?= (int)$assigned_branch_id ?>">
+                            <small class="text-muted">Always your own branch.</small>
                         </div>
-                        <div class="col-md-3">
-                            <div class="form-group"><label>Declared Value ($)</label><input type="number" step="0.01" min="0" name="declared_value" id="modalDeclaredValue" class="form-control" value="0"></div>
+                        <div class="form-group">
+                            <label>Destination Branch <span class="text-danger">*</span></label>
+                            <select name="destination_branch_id" id="modalDestinationBranch" class="form-control" required>
+                                <option value="">Select destination branch...</option>
+                                <?php foreach ($destination_branches as $b): ?><option value="<?= (int)$b['id'] ?>"><?= h($b['branch_name']) ?><?= !empty($b['branch_code']) ? ' (' . h($b['branch_code']) . ')' : '' ?></option><?php endforeach; ?>
+                            </select>
                         </div>
-                        <div class="col-md-4">
-                            <div class="form-group"><label>Origin</label><input type="text" name="origin" id="modalOrigin" class="form-control" placeholder="e.g. Guangzhou, China" list="originSuggestions"><datalist id="originSuggestions"><option value="China (Yiwu)"><option value="China (Guangzhou)"><option value="Dubai"><option value="Local"></datalist></div>
+                        <div class="form-group">
+                            <label>Delivery Method</label>
+                            <select name="delivery_method" id="modalDeliveryMethod" class="form-control">
+                                <option value="branch_pickup" selected>Branch Pickup</option>
+                                <option value="door_delivery">Door Delivery</option>
+                            </select>
                         </div>
-                        <div class="col-md-5">
-                            <div class="form-group"><label>Destination</label><input type="text" name="destination" id="modalDestination" class="form-control" placeholder="e.g. Mogadishu"></div>
+                    </div>
+
+                    <!-- Advanced / internal fields -->
+                    <div class="reception-grid">
+                        <div class="form-group">
+                            <label>Status</label>
+                            <select name="status" id="modalStatus" class="form-control">
+                                <?php foreach ($status_labels as $k => $v): ?><option value="<?= h($k) ?>" <?= $k === 'received' ? 'selected' : '' ?>><?= h($v) ?></option><?php endforeach; ?>
+                            </select>
                         </div>
+                        <div class="form-group"><label>Length (cm)</label><input type="number" step="0.1" min="0" name="length_cm" id="modalLength" class="form-control dimension-input" value="0"></div>
+                        <div class="form-group"><label>Width (cm)</label><input type="number" step="0.1" min="0" name="width_cm" id="modalWidth" class="form-control dimension-input" value="0"></div>
+                        <div class="form-group"><label>Height (cm)</label><input type="number" step="0.1" min="0" name="height_cm" id="modalHeight" class="form-control dimension-input" value="0"></div>
+                        <div class="form-group"><label>Volume (CBM)</label><input type="number" step="0.0001" min="0" name="volume_cbm" id="modalVolume" class="form-control" value="0" placeholder="Auto or manual"></div>
+                        <div class="form-group"><label>Declared Value ($)</label><input type="number" step="0.01" min="0" name="declared_value" id="modalDeclaredValue" class="form-control" value="0"></div>
+                    </div>
+                    <div class="reception-grid">
+                        <div class="form-group span-2"><label>Origin (trade lane, optional)</label><input type="text" name="origin" id="modalOrigin" class="form-control" placeholder="e.g. Guangzhou, China" list="originSuggestions"><datalist id="originSuggestions"><option value="China (Yiwu)"><option value="China (Guangzhou)"><option value="Dubai"><option value="Local"></datalist></div>
+                        <div class="form-group"><label>Destination (free text, optional)</label><input type="text" name="destination" id="modalDestination" class="form-control" placeholder="e.g. Mogadishu"></div>
                     </div>
                     <div class="form-group"><label>Notes</label><textarea name="notes" id="modalNotes" class="form-control" rows="2"></textarea></div>
                 </div>
@@ -793,7 +987,13 @@ $(document).ready(function() {
 
     $('#receptionForm').on('submit', function(e) {
         e.preventDefault();
-        if (!$('#modalPackageName').val().trim()) { showAlert('error', 'Package name is required'); return; }
+        const isEdit = !!$('#reception_id').val();
+        if (!$('#modalCustomerId').val()) { showAlert('error', 'Please select a customer / sender'); return; }
+        if (!$('#modalReceiverName').val().trim()) { showAlert('error', 'Receiver name is required'); return; }
+        if (!$('#modalReceiverPhone').val().trim()) { showAlert('error', 'Receiver phone is required'); return; }
+        if (!$('#modalPackageName').val().trim()) { showAlert('error', 'Cargo description is required'); return; }
+        if (!(parseInt($('#modalQuantity').val(), 10) > 0)) { showAlert('error', 'Quantity must be greater than zero'); return; }
+        if (!isEdit && !$('#modalDestinationBranch').val()) { showAlert('error', 'Please select a destination branch'); return; }
         const fd = new FormData(this);
         fd.append('ajax_action', 'save_reception');
         $.ajax({

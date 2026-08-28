@@ -1,13 +1,6 @@
 <?php
 // customer/invoices.php
-if (session_status() === PHP_SESSION_NONE) session_start();
-if (!isset($_SESSION['user_id']) || $_SESSION['role'] !== 'customer') {
-    header("Location: ../login.php");
-    exit;
-}
-
-require_once __DIR__ . '/../config/db_connect.php';
-$user_id = $_SESSION['user_id'];
+require_once __DIR__ . '/_auth.php';
 
 // Get Customer ID
 $stmt = $pdo->prepare("SELECT id FROM customers WHERE user_id = ?");
@@ -19,10 +12,10 @@ if (!$customer_id) { echo "❌ Macamiil lama helin."; exit; }
 // Get Invoices
 $stmt = $pdo->prepare("
     SELECT * FROM invoices 
-    WHERE customer_id = ?
+    WHERE customer_id = ? AND tenant_id = ?
     ORDER BY invoice_date DESC
 ");
-$stmt->execute([$customer_id]);
+$stmt->execute([$customer_id, $session_tenant_id]);
 $invoices = $stmt->fetchAll(PDO::FETCH_ASSOC);
 
 require_once __DIR__ . '/../includes/header.php';
@@ -65,7 +58,7 @@ require_once __DIR__ . '/../includes/header.php';
                                     <span class="badge <?= $badge ?>"><?= strtoupper($status) ?></span>
                                 </td>
                                 <td>
-                                    <a href="../public_invoice.php?number=<?= $i['invoice_number'] ?>" target="_blank" class="btn btn-sm btn-outline-primary">
+                                    <a href="../public_invoice.php?number=<?= urlencode($i['invoice_number']) ?>&token=<?= hash('sha256', $i['invoice_number'] . '|' . $i['id'] . '|' . $i['tenant_id'] . '|curdun-public-invoice-v1') ?>" target="_blank" class="btn btn-sm btn-outline-primary">
                                         <i class="fas fa-print"></i> Daabaco
                                     </a>
                                 </td>

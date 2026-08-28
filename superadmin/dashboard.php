@@ -6,20 +6,16 @@ if (session_status() === PHP_SESSION_NONE) {
     session_start();
 }
 
-// Check if user is logged in and is superadmin or company_admin
-if (!isset($_SESSION['user_id']) || !in_array($_SESSION['role'] ?? '', ['superadmin', 'tenant_admin', 'company_admin'])) {
+// Check if user is logged in and is true platform superadmin.
+// Tenant/company admins must stay in tenant_admin/* and must never get
+// platform-wide dashboard visibility.
+if (!isset($_SESSION['user_id']) || ($_SESSION['role_type'] ?? $_SESSION['role'] ?? '') !== 'superadmin') {
     header("Location: ../login.php");
     exit;
 }
 
 $role = $_SESSION['role'];
 $session_tenant_id = $_SESSION['tenant_id'] ?? 0;
-
-// Convert company_admin to tenant_admin
-if ($role === 'company_admin') {
-    $role = 'tenant_admin';
-    $_SESSION['role'] = 'tenant_admin';
-}
 
 require_once __DIR__ . '/../config/db_connect.php';
 require_once __DIR__ . '/../includes/functions.php';
@@ -58,9 +54,30 @@ if (is_dir($profiles_dir)) {
     }
 }
 
-// Get dashboard statistics
-$where_clause = ($role === 'tenant_admin') ? "WHERE tenant_id = " . intval($session_tenant_id) : "";
-$where_clause_user = ($role === 'tenant_admin') ? "WHERE tenant_id = " . intval($session_tenant_id) . " AND role_type != 'superadmin'" : "WHERE role_type != 'superadmin'";
+// Get dashboard statistics.
+//
+// For Super Admin, honour the platform tenant selector in the top bar
+// (`$_SESSION['selected_tenant_id']` — set by includes/set_tenant.php).
+// A numeric selection scopes every tenant-sensitive KPI on this page;
+// 'all' or unset means platform-wide (no tenant filter).
+$selected_tenant_id_int = 0;
+if ($role === 'superadmin'
+    && isset($_SESSION['selected_tenant_id'])
+    && $_SESSION['selected_tenant_id'] !== 'all'
+    && is_numeric($_SESSION['selected_tenant_id'])) {
+    $selected_tenant_id_int = (int)$_SESSION['selected_tenant_id'];
+}
+
+if ($role === 'tenant_admin') {
+    $where_clause      = "WHERE tenant_id = " . intval($session_tenant_id);
+    $where_clause_user = "WHERE tenant_id = " . intval($session_tenant_id) . " AND role_type != 'superadmin'";
+} elseif ($selected_tenant_id_int > 0) {
+    $where_clause      = "WHERE tenant_id = " . $selected_tenant_id_int;
+    $where_clause_user = "WHERE tenant_id = " . $selected_tenant_id_int . " AND role_type != 'superadmin'";
+} else {
+    $where_clause      = "";
+    $where_clause_user = "WHERE role_type != 'superadmin'";
+}
 
 // Total users
 try {
@@ -117,12 +134,22 @@ try {
     $stats['invoice_totals'] = ['total' => 0, 'paid' => 0, 'balance' => 0];
 }
 
-// Total shipments (using trucking_trips table)
+// Total shipments — count from the authoritative `shipments` table so the
+// card labelled "Total Shipments" reflects domain shipments, not trucking
+// trips (which are the vehicle-level lifecycle records, not shipments).
 try {
-    $stmt = $pdo->query("SELECT COUNT(*) as count FROM trucking_trips $where_clause");
+    $stmt = $pdo->query("SELECT COUNT(*) as count FROM shipments $where_clause");
     $stats['total_shipments'] = $stmt->fetch(PDO::FETCH_ASSOC)['count'];
 } catch(PDOException $e) {
     $stats['total_shipments'] = 0;
+}
+
+// Total trucking trips — counted separately for pages that still need it.
+try {
+    $stmt = $pdo->query("SELECT COUNT(*) as count FROM trucking_trips $where_clause");
+    $stats['total_trips'] = $stmt->fetch(PDO::FETCH_ASSOC)['count'];
+} catch(PDOException $e) {
+    $stats['total_trips'] = 0;
 }
 
 // --- PLATFORM GLOBAL REPORTS (Super Admin Logic) ---

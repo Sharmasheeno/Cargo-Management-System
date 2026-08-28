@@ -18,6 +18,7 @@ $user_id = $_SESSION['user_id'];
 $user_name = $_SESSION['user_name'] ?? 'Admin';
 
 require_once __DIR__ . '/../config/db_connect.php';
+require_once __DIR__ . '/../includes/sa_scope.php';
 
 // ==================== CREATE TABLES IF NOT EXISTS ====================
 try {
@@ -150,7 +151,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['ajax_action'])) {
     
     // ==================== BANK ACCOUNTS ====================
     if ($action === 'get_bank_accounts') {
-        $tenant_filter = isset($_POST['tenant']) ? (int)$_POST['tenant'] : 0;
+        $tenant_filter = isset($_POST['tenant']) ? (int)$_POST['tenant'] : sa_selected_tenant_id_int();
         
         $where = [];
         $params = [];
@@ -250,13 +251,18 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['ajax_action'])) {
         }
         
         try {
+            // The bank_accounts schema in this DB does not include a
+            // `notes` column. Prior code tried to insert it and threw
+            // SQLSTATE[42S22] every time. If the column is later added,
+            // extend these two statements and drop this guard.
             if (empty($id)) {
-                $stmt = $pdo->prepare("INSERT INTO bank_accounts (tenant_id, account_name, bank_name, account_number, account_type, currency, opening_balance, current_balance, notes, is_active, created_by) VALUES (?,?,?,?,?,?,?,?,?,?,?)");
-                $stmt->execute([$tenant_id, $account_name, $bank_name, $account_number, $account_type, $currency, $opening_balance, $opening_balance, $notes, $is_active, $user_id]);
-                echo json_encode(['success' => true, 'message' => 'Bank account added successfully']);
+                $stmt = $pdo->prepare("INSERT INTO bank_accounts (tenant_id, account_name, bank_name, account_number, account_type, currency, opening_balance, current_balance, is_active, created_by) VALUES (?,?,?,?,?,?,?,?,?,?)");
+                $stmt->execute([$tenant_id, $account_name, $bank_name, $account_number, $account_type, $currency, $opening_balance, $opening_balance, $is_active, $user_id]);
+                $new_id = (int)$pdo->lastInsertId();
+                echo json_encode(['success' => true, 'message' => 'Bank account added successfully', 'id' => $new_id]);
             } else {
-                $stmt = $pdo->prepare("UPDATE bank_accounts SET account_name=?, bank_name=?, account_number=?, account_type=?, currency=?, opening_balance=?, notes=?, is_active=? WHERE id=?");
-                $stmt->execute([$account_name, $bank_name, $account_number, $account_type, $currency, $opening_balance, $notes, $is_active, $id]);
+                $stmt = $pdo->prepare("UPDATE bank_accounts SET account_name=?, bank_name=?, account_number=?, account_type=?, currency=?, opening_balance=?, is_active=? WHERE id=?");
+                $stmt->execute([$account_name, $bank_name, $account_number, $account_type, $currency, $opening_balance, $is_active, $id]);
                 echo json_encode(['success' => true, 'message' => 'Bank account updated successfully']);
             }
         } catch (PDOException $e) {
@@ -362,42 +368,59 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['ajax_action'])) {
     if ($action === 'add_transaction') {
         $bank_account_id = (int)$_POST['bank_account_id'];
         $transaction_date = $_POST['transaction_date'];
-        $transaction_type = $_POST['transaction_type'];
+        // The bank_transactions schema stores the type as an enum
+        // ('income','expense','transfer'). Accept the historical UI aliases
+        // 'deposit'/'withdrawal' and map them onto the enum so both
+        // vocabularies work.
+        $raw_type = $_POST['transaction_type'] ?? '';
+        $transaction_type = ($raw_type === 'deposit') ? 'income'
+            : (($raw_type === 'withdrawal') ? 'expense' : $raw_type);
         $amount = (float)$_POST['amount'];
         $description = trim($_POST['description']);
         $reference_number = trim($_POST['reference_number'] ?? '');
-        $category = trim($_POST['category'] ?? '');
-        $status = $_POST['status'] ?? 'cleared';
-        
+
         if (empty($transaction_date) || $amount <= 0 || empty($description)) {
             echo json_encode(['success' => false, 'message' => 'Date, Amount, and Description are required']);
             exit;
         }
-        
+        if (!in_array($transaction_type, ['income','expense','transfer'], true)) {
+            echo json_encode(['success' => false, 'message' => "Transaction type must be one of income|expense|transfer|deposit|withdrawal (got '$raw_type')"]);
+            exit;
+        }
+
         try {
             $pdo->beginTransaction();
-            
-            // Get tenant_id from bank account
+
+            // Get tenant_id from bank account (scoped)
             $stmt = $pdo->prepare("SELECT tenant_id FROM bank_accounts WHERE id = ?");
             $stmt->execute([$bank_account_id]);
-            $tenant_id = $stmt->fetch(PDO::FETCH_ASSOC)['tenant_id'];
-            
-            // Insert transaction
-            $stmt = $pdo->prepare("INSERT INTO bank_transactions (tenant_id, bank_account_id, transaction_date, transaction_type, amount, description, reference_number, category, status, created_by) VALUES (?,?,?,?,?,?,?,?,?,?)");
-            $stmt->execute([$tenant_id, $bank_account_id, $transaction_date, $transaction_type, $amount, $description, $reference_number, $category, $status, $user_id]);
-            
-            // Update bank account balance
-            if ($transaction_type == 'deposit') {
-                $stmt = $pdo->prepare("UPDATE bank_accounts SET current_balance = current_balance + ? WHERE id = ?");
-            } else {
-                $stmt = $pdo->prepare("UPDATE bank_accounts SET current_balance = current_balance - ? WHERE id = ?");
+            $ba = $stmt->fetch(PDO::FETCH_ASSOC);
+            if (!$ba) {
+                $pdo->rollBack();
+                echo json_encode(['success' => false, 'message' => 'Bank account not found']);
+                exit;
             }
-            $stmt->execute([$amount, $bank_account_id]);
-            
+            $tenant_id = $ba['tenant_id'];
+
+            // Insert using only columns that actually exist in the schema.
+            $stmt = $pdo->prepare("INSERT INTO bank_transactions
+                (tenant_id, bank_account_id, transaction_date, transaction_type, amount, description, reference_type, reference_id, created_by)
+                VALUES (?,?,?,?,?,?, 'manual', NULL, ?)");
+            $stmt->execute([$tenant_id, $bank_account_id, $transaction_date, $transaction_type, $amount, ($reference_number !== '' ? ($description . ' [' . $reference_number . ']') : $description), $user_id]);
+            $new_tx_id = (int)$pdo->lastInsertId();
+
+            // Update running bank account balance
+            if ($transaction_type === 'income') {
+                $upd = $pdo->prepare("UPDATE bank_accounts SET current_balance = current_balance + ? WHERE id = ?");
+            } else {
+                $upd = $pdo->prepare("UPDATE bank_accounts SET current_balance = current_balance - ? WHERE id = ?");
+            }
+            $upd->execute([$amount, $bank_account_id]);
+
             $pdo->commit();
-            echo json_encode(['success' => true, 'message' => 'Transaction added successfully']);
+            echo json_encode(['success' => true, 'message' => 'Transaction added successfully', 'id' => $new_tx_id]);
         } catch (PDOException $e) {
-            $pdo->rollBack();
+            if ($pdo->inTransaction()) $pdo->rollBack();
             echo json_encode(['success' => false, 'message' => $e->getMessage()]);
         }
         exit;
@@ -451,8 +474,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['ajax_action'])) {
             $stmt->execute([$account_id]);
             $account = $stmt->fetch(PDO::FETCH_ASSOC);
             
-            // Get unreconciled transactions
-            $stmt = $pdo->prepare("SELECT * FROM bank_transactions WHERE bank_account_id = ? AND status IN ('pending','cleared') ORDER BY transaction_date");
+            // Get unreconciled transactions (schema uses `reconciled` tinyint,
+            // not a `status` column).
+            $stmt = $pdo->prepare("SELECT * FROM bank_transactions WHERE bank_account_id = ? AND (reconciled = 0 OR reconciled IS NULL) ORDER BY transaction_date");
             $stmt->execute([$account_id]);
             $transactions = $stmt->fetchAll(PDO::FETCH_ASSOC);
             
@@ -524,25 +548,64 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['ajax_action'])) {
             $selected_deposits = 0;
             $selected_withdrawals = 0;
             
+            // Idempotency: refuse to re-reconcile transactions that are
+            // already reconciled. Prevents a browser retry / double-click
+            // from creating a duplicate reconciliation row.
+            if (!empty($selected_transactions)) {
+                $placeholders = implode(',', array_fill(0, count($selected_transactions), '?'));
+                $stmt = $pdo->prepare("SELECT COUNT(*) FROM bank_transactions WHERE bank_account_id = ? AND id IN ($placeholders) AND reconciled = 1");
+                $stmt->execute(array_merge([$account_id], $selected_transactions));
+                if ((int)$stmt->fetchColumn() > 0) {
+                    $pdo->rollBack();
+                    echo json_encode([
+                        'success' => false,
+                        'message' => 'One or more selected transactions are already reconciled. Nothing to do.',
+                    ]);
+                    exit;
+                }
+            }
+
             foreach ($selected_transactions as $trans_id) {
-                $stmt = $pdo->prepare("SELECT transaction_type, amount FROM bank_transactions WHERE id = ?");
-                $stmt->execute([$trans_id]);
+                $stmt = $pdo->prepare("SELECT transaction_type, amount FROM bank_transactions WHERE id = ? AND bank_account_id = ?");
+                $stmt->execute([$trans_id, $account_id]);
                 $t = $stmt->fetch(PDO::FETCH_ASSOC);
-                if ($t['transaction_type'] == 'deposit') {
+                if (!$t) continue;
+                // 'income' = deposit, 'expense' = withdrawal (schema enum).
+                // Legacy 'deposit'/'withdrawal' aliases still accepted for
+                // pre-migration rows.
+                if ($t['transaction_type'] === 'income' || $t['transaction_type'] === 'deposit') {
                     $selected_deposits += $t['amount'];
                 } else {
                     $selected_withdrawals += $t['amount'];
                 }
-                
-                // Mark as reconciled
-                $stmt = $pdo->prepare("UPDATE bank_transactions SET status = 'reconciled', reconciled_date = ?, reconciled_by = ? WHERE id = ?");
-                $stmt->execute([$statement_date, $user_id, $trans_id]);
+
+                // Mark as reconciled (schema uses tinyint `reconciled`).
+                $stmt = $pdo->prepare("UPDATE bank_transactions SET reconciled = 1, reconciled_date = ? WHERE id = ?");
+                $stmt->execute([$statement_date, $trans_id]);
             }
             
             // Calculate book balance of selected transactions
             $selected_balance = $account['opening_balance'] + $selected_deposits - $selected_withdrawals;
             $difference = $statement_balance - $selected_balance;
-            
+
+            // Enforce reconciliation invariant: statement_balance must equal
+            // the sum of opening_balance + selected deposits - selected
+            // withdrawals. A non-zero difference means the operator has NOT
+            // finished matching; refuse to mark reconciled.
+            if (abs($difference) > 0.005) {
+                $pdo->rollBack();
+                echo json_encode([
+                    'success' => false,
+                    'message' => 'Reconciliation refused: statement balance ' . number_format($statement_balance, 2)
+                        . ' does not match book balance ' . number_format($selected_balance, 2)
+                        . ' (difference ' . number_format($difference, 2) . '). Match the missing transactions before completing.',
+                    'difference' => $difference,
+                    'book_balance' => $selected_balance,
+                    'statement_balance' => $statement_balance,
+                ]);
+                exit;
+            }
+
             // Create reconciliation record
             $stmt = $pdo->prepare("INSERT INTO bank_reconciliations (tenant_id, bank_account_id, reconciliation_date, statement_ending_balance, statement_start_date, statement_end_date, book_balance, difference_amount, is_reconciled, notes, created_by) VALUES (?,?,?,?,?,?,?,?,?,?,?)");
             $stmt->execute([$account['tenant_id'], $account_id, date('Y-m-d'), $statement_balance, date('Y-m-d', strtotime('-30 days')), $statement_date, $selected_balance, $difference, 1, $notes, $user_id]);
@@ -872,6 +935,116 @@ require_once __DIR__ . '/../includes/header.php';
 </div>
 
 <script src="https://code.jquery.com/jquery-3.6.0.min.js"></script>
+<script>
+// [csrf-shim] inline jQuery pages need the same ajaxSetup guard that
+// includes/footer.php installs. Attach X-CSRF-Token to every same-origin
+// mutation from this page.
+(function () {
+    var m = document.querySelector('meta[name="csrf-token"]');
+    if (!m || !window.jQuery) return;
+    var token = m.getAttribute('content') || '';
+    jQuery.ajaxSetup({
+        beforeSend: function (xhr, settings) {
+            var method = (settings.type || 'GET').toUpperCase();
+            if (method === 'GET' || method === 'HEAD' || method === 'OPTIONS') return;
+            if (settings.crossDomain) return;
+            xhr.setRequestHeader('X-CSRF-Token', token);
+            if (settings.data instanceof FormData && !settings.data.has('csrf_token')) {
+                settings.data.append('csrf_token', token);
+            }
+        }
+    });
+
+// [async-error-shim] Standardize AJAX failure handling so every finance
+// page shows a controlled error instead of a permanent spinner. This
+// runs after the jQuery.ajaxSetup shim above, so both live on the same
+// jQuery instance.
+(function () {
+    if (!window.jQuery) return;
+    if (window.__FIN_ASYNC_SHIM__) return;
+    window.__FIN_ASYNC_SHIM__ = true;
+    // Install an ajaxSend handler that marks the click-source button
+    // with data-finance-pending. Fires once per shim install.
+    if (!window.__FIN_SEND_MARK__) {
+        window.__FIN_SEND_MARK__ = true;
+        jQuery(document).on('ajaxSend', function (event, xhr, settings) {
+            try {
+                if (!settings || settings.crossDomain) return;
+                var el = document.activeElement;
+                if (!el) return;
+                var tag = (el.tagName || '').toUpperCase();
+                if (tag !== 'BUTTON' && !(tag === 'INPUT' && (el.type || '').toLowerCase() === 'submit')) return;
+                var $el = jQuery(el);
+                // If it isn't disabled at the moment ajax fires, the
+                // caller isn't gating this button on the request, so
+                // don't mark it.
+                if (!$el.prop('disabled')) return;
+                if ($el.attr('data-finance-pending') === '1') return;
+                if ($el.attr('data-original-html') === undefined) {
+                    $el.attr('data-original-html', $el.html());
+                }
+                $el.attr('data-finance-pending', '1');
+            } catch (e) {}
+        });
+    }
+    jQuery(document).ajaxError(function (event, xhr, settings, thrownError) {
+        // Skip cross-domain or explicitly-suppressed calls.
+        if (settings && settings.crossDomain) return;
+        if (settings && settings.suppressGlobalError) return;
+        var msg;
+        try {
+            var body = xhr && xhr.responseText ? xhr.responseText : '';
+            var parsed = null;
+            try { parsed = body ? JSON.parse(body) : null; } catch (e) {}
+            if (parsed && parsed.message) msg = parsed.message;
+            else if (xhr && xhr.status === 0) msg = 'Network error — request could not complete';
+            else if (xhr && xhr.status === 403) msg = 'Not authorized (403)';
+            else if (xhr && xhr.status === 404) msg = 'Endpoint not found (404)';
+            else if (xhr && xhr.status >= 500) msg = 'Server error (' + xhr.status + ')';
+            else msg = 'Request failed' + (xhr && xhr.status ? ' (' + xhr.status + ')' : '');
+        } catch (e) {
+            msg = 'Request failed';
+        }
+        // Try Bootstrap toast first if present; fall back to alert.
+        try {
+            if (window.jQuery && window.jQuery.fn && window.jQuery.fn.toast) {
+                var $c = jQuery('#toast-container');
+                if (!$c.length) {
+                    $c = jQuery('<div id="toast-container" style="position:fixed;top:20px;right:20px;z-index:99999;"></div>').appendTo('body');
+                }
+                var $t = jQuery('<div class="alert alert-danger" role="alert" style="min-width:280px;box-shadow:0 2px 8px rgba(0,0,0,.15);">' + jQuery('<div/>').text(msg).html() + '</div>');
+                $c.append($t);
+                setTimeout(function () { $t.fadeOut(400, function(){ jQuery(this).remove(); }); }, 5000);
+                return;
+            }
+        } catch (e) {}
+                // [async-error-shim-v3] Targeted UI-state recovery. Only restores
+        // buttons that were explicitly marked at ajaxSend time with
+        // data-finance-pending="1" and whose original HTML was captured
+        // in data-original-html. Never touches other disabled controls —
+        // tenant-validation locks, RBAC locks, workflow gates, and
+        // missing-required-selection blockers all stay locked as
+        // intended.
+        try {
+            jQuery('[data-finance-pending="1"]').each(function () {
+                var $b = jQuery(this);
+                var orig = $b.attr('data-original-html');
+                if (orig !== undefined && orig !== null) $b.html(orig);
+                $b.prop('disabled', false);
+                $b.removeAttr('data-finance-pending');
+                $b.removeAttr('data-original-html');
+            });
+        } catch (e) {}
+        // Only alert once per 5-second window to prevent alert-storms.
+        if (!window.__FIN_ALERT_LOCK__) {
+            window.__FIN_ALERT_LOCK__ = true;
+            try { window.alert(msg); } catch (e) {}
+            setTimeout(function () { window.__FIN_ALERT_LOCK__ = false; }, 5000);
+        }
+    });
+})();
+})();
+</script>
 <script src="https://cdn.jsdelivr.net/npm/bootstrap@4.5.2/dist/js/bootstrap.bundle.min.js"></script>
 <script>
 let currentAccountId = null;

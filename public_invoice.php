@@ -1,8 +1,39 @@
 <?php
 // public_invoice.php - Publicly viewable invoice for sharing via WhatsApp
+if (session_status() === PHP_SESSION_NONE) {
+    session_start();
+}
 require_once __DIR__ . '/config/db_connect.php';
 
 $invoice_number = $_GET['number'] ?? '';
+$token = $_GET['token'] ?? '';
+
+function public_invoice_token(array $invoice): string
+{
+    return hash('sha256', ($invoice['invoice_number'] ?? '') . '|' . ($invoice['id'] ?? '') . '|' . ($invoice['tenant_id'] ?? '') . '|curdun-public-invoice-v1');
+}
+
+function public_invoice_authorized(array $invoice, string $token): bool
+{
+    if ($token !== '' && hash_equals(public_invoice_token($invoice), $token)) {
+        return true;
+    }
+
+    if (!empty($_SESSION['user_id'])) {
+        $roleType = $_SESSION['role_type'] ?? $_SESSION['role'] ?? '';
+        if ($roleType === 'customer') {
+            return (int)($_SESSION['customer_id'] ?? 0) === (int)$invoice['customer_id']
+                && (int)($_SESSION['tenant_id'] ?? 0) === (int)$invoice['tenant_id'];
+        }
+
+        return in_array($roleType, [
+            'superadmin', 'tenant_admin', 'company_admin', 'branch_manager',
+            'finance_manager', 'reception_clerk', 'clerk'
+        ], true);
+    }
+
+    return false;
+}
 
 if (empty($invoice_number)) {
     http_response_code(404);
@@ -13,8 +44,8 @@ try {
     $stmt = $pdo->prepare("
         SELECT i.*, 
                c.customer_name, c.phone as customer_phone, c.address as customer_address, c.email as customer_email,
-               t.name as tenant_name, t.phone as tenant_phone, t.email as tenant_email, t.address as tenant_address, t.logo as tenant_logo,
-               tr.trip_number, tr.scheduled_date as trip_date
+               t.name as tenant_name, t.phone as tenant_phone, t.email as tenant_email, t.address as tenant_address, t.logo_url as tenant_logo,
+               tr.trip_number, COALESCE(tr.departed_at, tr.loaded_at, tr.created_at) as trip_date
         FROM invoices i
         LEFT JOIN customers c ON i.customer_id = c.id
         LEFT JOIN tenants t ON i.tenant_id = t.id
@@ -25,6 +56,11 @@ try {
     $inv = $stmt->fetch(PDO::FETCH_ASSOC);
 
     if (!$inv) {
+        http_response_code(404);
+        die("<h1>Khalad: Biilkan lama helin.</h1>");
+    }
+
+    if (!public_invoice_authorized($inv, $token)) {
         http_response_code(404);
         die("<h1>Khalad: Biilkan lama helin.</h1>");
     }

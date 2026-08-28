@@ -400,22 +400,38 @@ if (isset($_SERVER['HTTP_X_REQUESTED_WITH']) && strtolower($_SERVER['HTTP_X_REQU
             break;
             
         case 'get_statistics':
-            $sql = "SELECT 
-                        COUNT(*) as total,
-                        SUM(CASE WHEN is_active = 1 THEN 1 ELSE 0 END) as active,
-                        SUM(CASE WHEN is_active = 0 THEN 1 ELSE 0 END) as inactive,
-                        AVG(rating) as avg_rating,
-                        SUM(total_trips) as total_trips
-                    FROM drivers";
+            // total_trips is computed from the authoritative `trucking_trips`
+            // relation, not from `drivers.total_trips` (which is a stale
+            // cached counter that nothing updates). This is the same basis
+            // that the driver-row subquery uses in `get_drivers`, so cards
+            // and rows always agree.
+            $tenantWhereDrivers = '';
+            $tenantWhereTrips   = '';
             $params = [];
-            
             if ($role !== 'superadmin') {
-                $sql .= " WHERE tenant_id = ?";
+                $tenantWhereDrivers = ' WHERE tenant_id = ?';
+                $tenantWhereTrips   = ' AND d.tenant_id = ?';
                 $params[] = $session_tenant_id;
             }
-            
+
+            $sql = "SELECT
+                        COUNT(*) AS total,
+                        SUM(CASE WHEN is_active = 1 THEN 1 ELSE 0 END) AS active,
+                        SUM(CASE WHEN is_active = 0 THEN 1 ELSE 0 END) AS inactive,
+                        COALESCE(AVG(NULLIF(rating, 0)), 0) AS avg_rating
+                      FROM drivers"
+                    . $tenantWhereDrivers;
             $stmt = safeQuery($pdo, $sql, $params);
             $stats = $stmt ? $stmt->fetch(PDO::FETCH_ASSOC) : [];
+
+            $tripSql = "SELECT COUNT(*)
+                          FROM trucking_trips t
+                          JOIN drivers d ON d.id = t.driver_id
+                         WHERE t.status IN ('completed','delivered')"
+                        . $tenantWhereTrips;
+            $tripStmt = safeQuery($pdo, $tripSql, $params);
+            $stats['total_trips'] = $tripStmt ? (int)$tripStmt->fetchColumn() : 0;
+
             $response = ['success' => true, 'data' => $stats];
             break;
     }
@@ -895,6 +911,116 @@ include_once __DIR__ . '/../includes/header.php';
 </div>
 
 <script src="https://code.jquery.com/jquery-3.6.0.min.js"></script>
+<script>
+// [csrf-shim] inline jQuery pages need the same ajaxSetup guard that
+// includes/footer.php installs. Attach X-CSRF-Token to every same-origin
+// mutation from this page.
+(function () {
+    var m = document.querySelector('meta[name="csrf-token"]');
+    if (!m || !window.jQuery) return;
+    var token = m.getAttribute('content') || '';
+    jQuery.ajaxSetup({
+        beforeSend: function (xhr, settings) {
+            var method = (settings.type || 'GET').toUpperCase();
+            if (method === 'GET' || method === 'HEAD' || method === 'OPTIONS') return;
+            if (settings.crossDomain) return;
+            xhr.setRequestHeader('X-CSRF-Token', token);
+            if (settings.data instanceof FormData && !settings.data.has('csrf_token')) {
+                settings.data.append('csrf_token', token);
+            }
+        }
+    });
+
+// [async-error-shim] Standardize AJAX failure handling so every finance
+// page shows a controlled error instead of a permanent spinner. This
+// runs after the jQuery.ajaxSetup shim above, so both live on the same
+// jQuery instance.
+(function () {
+    if (!window.jQuery) return;
+    if (window.__FIN_ASYNC_SHIM__) return;
+    window.__FIN_ASYNC_SHIM__ = true;
+    // Install an ajaxSend handler that marks the click-source button
+    // with data-finance-pending. Fires once per shim install.
+    if (!window.__FIN_SEND_MARK__) {
+        window.__FIN_SEND_MARK__ = true;
+        jQuery(document).on('ajaxSend', function (event, xhr, settings) {
+            try {
+                if (!settings || settings.crossDomain) return;
+                var el = document.activeElement;
+                if (!el) return;
+                var tag = (el.tagName || '').toUpperCase();
+                if (tag !== 'BUTTON' && !(tag === 'INPUT' && (el.type || '').toLowerCase() === 'submit')) return;
+                var $el = jQuery(el);
+                // If it isn't disabled at the moment ajax fires, the
+                // caller isn't gating this button on the request, so
+                // don't mark it.
+                if (!$el.prop('disabled')) return;
+                if ($el.attr('data-finance-pending') === '1') return;
+                if ($el.attr('data-original-html') === undefined) {
+                    $el.attr('data-original-html', $el.html());
+                }
+                $el.attr('data-finance-pending', '1');
+            } catch (e) {}
+        });
+    }
+    jQuery(document).ajaxError(function (event, xhr, settings, thrownError) {
+        // Skip cross-domain or explicitly-suppressed calls.
+        if (settings && settings.crossDomain) return;
+        if (settings && settings.suppressGlobalError) return;
+        var msg;
+        try {
+            var body = xhr && xhr.responseText ? xhr.responseText : '';
+            var parsed = null;
+            try { parsed = body ? JSON.parse(body) : null; } catch (e) {}
+            if (parsed && parsed.message) msg = parsed.message;
+            else if (xhr && xhr.status === 0) msg = 'Network error — request could not complete';
+            else if (xhr && xhr.status === 403) msg = 'Not authorized (403)';
+            else if (xhr && xhr.status === 404) msg = 'Endpoint not found (404)';
+            else if (xhr && xhr.status >= 500) msg = 'Server error (' + xhr.status + ')';
+            else msg = 'Request failed' + (xhr && xhr.status ? ' (' + xhr.status + ')' : '');
+        } catch (e) {
+            msg = 'Request failed';
+        }
+        // Try Bootstrap toast first if present; fall back to alert.
+        try {
+            if (window.jQuery && window.jQuery.fn && window.jQuery.fn.toast) {
+                var $c = jQuery('#toast-container');
+                if (!$c.length) {
+                    $c = jQuery('<div id="toast-container" style="position:fixed;top:20px;right:20px;z-index:99999;"></div>').appendTo('body');
+                }
+                var $t = jQuery('<div class="alert alert-danger" role="alert" style="min-width:280px;box-shadow:0 2px 8px rgba(0,0,0,.15);">' + jQuery('<div/>').text(msg).html() + '</div>');
+                $c.append($t);
+                setTimeout(function () { $t.fadeOut(400, function(){ jQuery(this).remove(); }); }, 5000);
+                return;
+            }
+        } catch (e) {}
+                // [async-error-shim-v3] Targeted UI-state recovery. Only restores
+        // buttons that were explicitly marked at ajaxSend time with
+        // data-finance-pending="1" and whose original HTML was captured
+        // in data-original-html. Never touches other disabled controls —
+        // tenant-validation locks, RBAC locks, workflow gates, and
+        // missing-required-selection blockers all stay locked as
+        // intended.
+        try {
+            jQuery('[data-finance-pending="1"]').each(function () {
+                var $b = jQuery(this);
+                var orig = $b.attr('data-original-html');
+                if (orig !== undefined && orig !== null) $b.html(orig);
+                $b.prop('disabled', false);
+                $b.removeAttr('data-finance-pending');
+                $b.removeAttr('data-original-html');
+            });
+        } catch (e) {}
+        // Only alert once per 5-second window to prevent alert-storms.
+        if (!window.__FIN_ALERT_LOCK__) {
+            window.__FIN_ALERT_LOCK__ = true;
+            try { window.alert(msg); } catch (e) {}
+            setTimeout(function () { window.__FIN_ALERT_LOCK__ = false; }, 5000);
+        }
+    });
+})();
+})();
+</script>
 <script src="https://cdn.jsdelivr.net/npm/bootstrap@4.5.2/dist/js/bootstrap.bundle.min.js"></script>
 <script src="https://cdn.datatables.net/1.13.4/js/jquery.dataTables.min.js"></script>
 <script src="https://cdn.datatables.net/1.13.4/js/dataTables.bootstrap4.min.js"></script>

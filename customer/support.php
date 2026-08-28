@@ -3,29 +3,7 @@
 // Provides support tickets, FAQs, and WhatsApp integration
 // Primary: Violet #520066, Secondary: Yellow #f4dd08
 
-if (session_status() === PHP_SESSION_NONE) {
-    session_start();
-}
-
-// Check if user is logged in and is customer
-if (!isset($_SESSION['user_id']) || $_SESSION['role'] !== 'customer') {
-    header("Location: ../login.php");
-    exit;
-}
-
-$role = $_SESSION['role'];
-$customer_id = $_SESSION['customer_id'] ?? 0;
-$session_tenant_id = $_SESSION['tenant_id'] ?? 0;
-$user_id = $_SESSION['user_id'];
-$user_name = $_SESSION['user_name'] ?? 'Customer';
-
-// Security: If no customer ID is assigned, redirect
-if (!$customer_id) {
-    header("Location: ../dashboard.php?error=no_customer");
-    exit;
-}
-
-require_once __DIR__ . '/../config/db_connect.php';
+require_once __DIR__ . '/_auth.php';
 
 // WhatsApp Support Number - Fixed for this customer support
 $WHATSAPP_SUPPORT_NUMBER = "252614417875";

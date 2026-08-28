@@ -35,7 +35,8 @@ if ($role === 'superadmin') {
 // Get filter values
 $date_from = $_GET['date_from'] ?? date('Y-m-01');
 $date_to = $_GET['date_to'] ?? date('Y-m-t');
-$tenant_filter = ($role === 'superadmin') ? (isset($_GET['tenant']) ? (int)$_GET['tenant'] : 0) : $session_tenant_id;
+require_once __DIR__ . '/../includes/sa_scope.php';
+$tenant_filter = ($role === 'superadmin') ? (isset($_GET['tenant']) ? (int)$_GET['tenant'] : sa_selected_tenant_id_int()) : $session_tenant_id;
 $period_type = $_GET['period_type'] ?? 'month';
 $include_details = isset($_GET['details']) && $_GET['details'] == 1;
 

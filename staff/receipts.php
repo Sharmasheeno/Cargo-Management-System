@@ -21,11 +21,9 @@ if (session_status() === PHP_SESSION_NONE) {
 }
 
 // Only staff accounts may access this page.
-// NOTE: login.php stores the sub-role (role_type) into $_SESSION['role'] as an alias, so a
-// plain === 'staff' check only matches the generic staff account and would incorrectly lock
-// out every staff sub-role. Check role_type (falling back to role) against the known staff
-// role_types instead -- same pattern applied to the 4 existing base staff pages.
-$staff_role_types = ['staff', 'warehouse_supervisor', 'logistics_supervisor', 'finance_manager', 'clerk'];
+// See staffFamilyRoleTypes() / staffFinanceRoleTypes() in includes/functions.php.
+require_once __DIR__ . '/../includes/functions.php';
+$staff_role_types = staffFamilyRoleTypes();
 $current_role_type = $_SESSION['role_type'] ?? $_SESSION['role'] ?? '';
 if (!isset($_SESSION['user_id']) || !in_array($current_role_type, $staff_role_types, true)) {
     header("Location: ../login.php");
@@ -33,7 +31,7 @@ if (!isset($_SESSION['user_id']) || !in_array($current_role_type, $staff_role_ty
 }
 
 // Only finance_manager / clerk role_types are permitted on this page
-if (!in_array($current_role_type, ['finance_manager', 'clerk'], true)) {
+if (!in_array($current_role_type, staffFinanceRoleTypes(), true)) {
     header("Location: ../staff/dashboard.php?error=access_denied");
     exit;
 }
@@ -286,7 +284,8 @@ function validateReceiptInput(array $post, PDO $pdo, int $tenant_id, ?int $recei
     $points_used = (float)($post['points_used'] ?? 0);
 
     if ($customer_id <= 0) throw new Exception('Please select a customer');
-    if ($original_amount < 0) throw new Exception('Original amount cannot be negative');
+    if (!$invoice_id) throw new Exception('Please select a valid invoice');
+    if ($original_amount <= 0) throw new Exception('Original amount must be greater than zero');
     if ($discount_applied < 0) throw new Exception('Discount cannot be negative');
     if ($points_used < 0) throw new Exception('Points used cannot be negative');
 
@@ -307,6 +306,9 @@ function validateReceiptInput(array $post, PDO $pdo, int $tenant_id, ?int $recei
     $amount = max(0, $original_amount - $total_discount);
 
     $payment_method = trim($post['payment_method'] ?? 'cash');
+    if (!in_array($payment_method, ['cash', 'bank_transfer'], true)) {
+        throw new Exception('Invalid payment method');
+    }
     $reference_number = trim($post['reference_number'] ?? '');
     $bank_account_id = !empty($post['bank_account_id']) ? (int)$post['bank_account_id'] : null;
     $payment_date = !empty($post['payment_date']) ? $post['payment_date'] : date('Y-m-d');
@@ -317,6 +319,27 @@ function validateReceiptInput(array $post, PDO $pdo, int $tenant_id, ?int $recei
     $checkAccount = $pdo->prepare("SELECT id FROM bank_accounts WHERE id = ? AND tenant_id = ? AND is_active = 1 LIMIT 1");
     $checkAccount->execute([$bank_account_id, $tenant_id]);
     if (!$checkAccount->fetch()) throw new Exception('Selected bank account not found or inactive');
+
+    $checkCustomer = $pdo->prepare("SELECT id FROM customers WHERE id = ? AND tenant_id = ? AND is_active = 1 LIMIT 1");
+    $checkCustomer->execute([$customer_id, $tenant_id]);
+    if (!$checkCustomer->fetch()) throw new Exception('Customer not found');
+
+    $checkInvoice = $pdo->prepare("
+        SELECT i.id, i.customer_id, i.total_amount, i.paid_amount, i.status
+        FROM invoices i
+        LEFT JOIN trucking_trips t ON t.id = i.trip_id AND t.tenant_id = i.tenant_id
+        WHERE i.id = ? AND i.tenant_id = ? AND i.customer_id = ?
+          AND COALESCE(i.is_active,1)=1
+          AND i.status NOT IN ('paid','cancelled')
+          AND (t.branch_id = ? OR t.from_branch_id = ? OR t.to_branch_id = ?)
+        LIMIT 1
+    ");
+    $checkInvoice->execute([$invoice_id, $tenant_id, $customer_id, $branch_id, $branch_id, $branch_id]);
+    $invoice = $checkInvoice->fetch(PDO::FETCH_ASSOC);
+    if (!$invoice) throw new Exception('Invoice not found, already paid/cancelled, or outside your branch scope');
+    $balance = round((float)$invoice['total_amount'] - (float)$invoice['paid_amount'], 2);
+    if ($balance <= 0) throw new Exception('Invoice has no remaining balance');
+    if ($amount > $balance) throw new Exception('Payment exceeds remaining invoice balance');
 
     return [
         'customer_id' => $customer_id,
@@ -330,28 +353,49 @@ function validateReceiptInput(array $post, PDO $pdo, int $tenant_id, ?int $recei
         'reference_number' => $reference_number,
         'bank_account_id' => $bank_account_id,
         'payment_date' => $payment_date,
-        'notes' => $notes
+        'notes' => $notes,
+        'invoice_balance' => $balance
     ];
 }
 
 function createReceipt(PDO $pdo, int $tenant_id, int $user_id, int $branch_id, array $data, float $loyalty_rate): array {
     $pdo->beginTransaction();
     try {
+        $invoiceStmt = $pdo->prepare("
+            SELECT i.id, i.total_amount, i.paid_amount, i.status
+            FROM invoices i
+            LEFT JOIN trucking_trips t ON t.id = i.trip_id AND t.tenant_id = i.tenant_id
+            WHERE i.id = ? AND i.tenant_id = ? AND i.customer_id = ?
+              AND COALESCE(i.is_active,1)=1
+              AND i.status NOT IN ('paid','cancelled')
+              AND (t.branch_id = ? OR t.from_branch_id = ? OR t.to_branch_id = ?)
+            LIMIT 1
+            FOR UPDATE
+        ");
+        $invoiceStmt->execute([$data['invoice_id'], $tenant_id, $data['customer_id'], $branch_id, $branch_id, $branch_id]);
+        $invoice = $invoiceStmt->fetch(PDO::FETCH_ASSOC);
+        if (!$invoice) throw new Exception('Invoice not found, already paid/cancelled, or outside your branch scope');
+        $balance = round((float)$invoice['total_amount'] - (float)$invoice['paid_amount'], 2);
+        if ($balance <= 0) throw new Exception('Invoice has no remaining balance');
+        if ((float)$data['amount'] <= 0) throw new Exception('Payment amount must be greater than zero');
+        if ((float)$data['amount'] > $balance) throw new Exception('Payment exceeds remaining invoice balance');
+
+        if ($data['reference_number'] !== '') {
+            $replay = $pdo->prepare("SELECT id FROM receipts WHERE tenant_id = ? AND invoice_id = ? AND reference_number = ? LIMIT 1");
+            $replay->execute([$tenant_id, $data['invoice_id'], $data['reference_number']]);
+            if ($replay->fetch()) throw new Exception('Duplicate payment reference for this invoice');
+        }
+
         $receipt_number = generateStaffReceiptNumber($pdo, $tenant_id, $branch_id);
         $stmt = $pdo->prepare("INSERT INTO receipts (tenant_id, branch_id, receipt_number, invoice_id, customer_id, amount, original_amount, discount_applied, points_used, points_discount_amount, payment_date, payment_method, reference_number, bank_account_id, notes, created_by, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW())");
         $stmt->execute([$tenant_id, $branch_id, $receipt_number, $data['invoice_id'], $data['customer_id'], $data['amount'], $data['original_amount'], $data['discount_applied'], $data['points_used'], $data['points_discount_amount'], $data['payment_date'], $data['payment_method'], $data['reference_number'], $data['bank_account_id'], $data['notes'], $user_id]);
         $receipt_id = (int)$pdo->lastInsertId();
         updateBankAccountBalance($pdo, $tenant_id, $data['bank_account_id'], (float)$data['amount']);
 
-        // Keep the linked invoice's paid_amount / status roughly in sync
-        if (!empty($data['invoice_id'])) {
-            try {
-                $pdo->prepare("UPDATE invoices SET paid_amount = COALESCE(paid_amount, 0) + ?, updated_at = NOW() WHERE id = ? AND tenant_id = ?")
-                    ->execute([$data['amount'], $data['invoice_id'], $tenant_id]);
-                $pdo->prepare("UPDATE invoices SET status = 'paid' WHERE id = ? AND tenant_id = ? AND paid_amount >= total_amount AND status NOT IN ('cancelled')")
-                    ->execute([$data['invoice_id'], $tenant_id]);
-            } catch (Throwable $e) {}
-        }
+        $newPaid = round((float)$invoice['paid_amount'] + (float)$data['amount'], 2);
+        $newStatus = $newPaid >= round((float)$invoice['total_amount'], 2) ? 'paid' : 'sent';
+        $pdo->prepare("UPDATE invoices SET paid_amount = ?, status = ?, updated_at = NOW() WHERE id = ? AND tenant_id = ?")
+            ->execute([$newPaid, $newStatus, $data['invoice_id'], $tenant_id]);
 
         $points = awardReceiptPoints($pdo, $receipt_id, $tenant_id, $loyalty_rate, $branch_id);
         $pdo->commit();
@@ -527,8 +571,18 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['ajax_action'])) {
 
         if ($action === 'get_invoices') {
             $customer_id = (int)($_POST['customer_id'] ?? 0);
-            $stmt = $pdo->prepare("SELECT id, invoice_number, COALESCE(total_amount, 0) AS total_amount, COALESCE(paid_amount, 0) AS paid_amount, GREATEST(COALESCE(total_amount, 0) - COALESCE(paid_amount, 0), 0) AS due_amount FROM invoices WHERE tenant_id = ? AND customer_id = ? AND status NOT IN ('paid', 'cancelled') ORDER BY id DESC");
-            $stmt->execute([$tenant_id, $customer_id]);
+            $stmt = $pdo->prepare("
+                SELECT i.id, i.invoice_number, COALESCE(i.total_amount, 0) AS total_amount,
+                       COALESCE(i.paid_amount, 0) AS paid_amount,
+                       GREATEST(COALESCE(i.total_amount, 0) - COALESCE(i.paid_amount, 0), 0) AS due_amount
+                FROM invoices i
+                LEFT JOIN trucking_trips t ON t.id = i.trip_id AND t.tenant_id = i.tenant_id
+                WHERE i.tenant_id = ? AND i.customer_id = ?
+                  AND i.status NOT IN ('paid', 'cancelled')
+                  AND (t.branch_id = ? OR t.from_branch_id = ? OR t.to_branch_id = ?)
+                ORDER BY i.id DESC
+            ");
+            $stmt->execute([$tenant_id, $customer_id, $assigned_branch_id, $assigned_branch_id, $assigned_branch_id]);
             json_response(['success' => true, 'invoices' => $stmt->fetchAll(PDO::FETCH_ASSOC)]);
         }
 

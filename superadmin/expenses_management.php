@@ -18,6 +18,14 @@ $user_id = $_SESSION['user_id'];
 $user_name = $_SESSION['user_name'] ?? 'Admin';
 
 require_once __DIR__ . '/../config/db_connect.php';
+require_once __DIR__ . '/../includes/sa_scope.php';
+
+// Load the double-entry AccountingService so vendor-bill creation and
+// bill payments post balanced journal entries (Dr Expense / Cr AP on
+// bill, Dr AP / Cr Cash on payment). Without it the ledger drifts.
+if (file_exists(__DIR__ . '/../includes/AccountingService.php')) {
+    require_once __DIR__ . '/../includes/AccountingService.php';
+}
 
 // ==================== CREATE TABLES IF NOT EXISTS ====================
 try {
@@ -163,7 +171,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['ajax_action'])) {
         $limit = 10;
         $offset = ($page - 1) * $limit;
         $search = $_POST['search'] ?? '';
-        $tenant_filter = isset($_POST['tenant']) ? (int)$_POST['tenant'] : 0;
+        $tenant_filter = isset($_POST['tenant']) ? (int)$_POST['tenant'] : sa_selected_tenant_id_int();
         
         $where = [];
         $params = [];
@@ -296,7 +304,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['ajax_action'])) {
         $offset = ($page - 1) * $limit;
         $search = $_POST['search'] ?? '';
         $status_filter = $_POST['status'] ?? '';
-        $tenant_filter = isset($_POST['tenant']) ? (int)$_POST['tenant'] : 0;
+        $tenant_filter = isset($_POST['tenant']) ? (int)$_POST['tenant'] : sa_selected_tenant_id_int();
         
         $where = [];
         $params = [];
@@ -394,11 +402,34 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['ajax_action'])) {
             exit;
         }
         
+        // Tenant guards: scope must match, and the vendor must belong to the
+        // tenant the bill is being recorded for.
+        $sa_scope = function_exists('sa_selected_tenant_id_int') ? sa_selected_tenant_id_int() : 0;
+        if ($sa_scope > 0 && (int)$tenant_id !== $sa_scope) {
+            echo json_encode(['success' => false, 'message' => 'Selected tenant does not match the active scope.']);
+            exit;
+        }
+        $vendStmt = $pdo->prepare("SELECT tenant_id FROM vendors WHERE id = ?");
+        $vendStmt->execute([$vendor_id]);
+        $vendTenant = $vendStmt->fetchColumn();
+        if (!$vendTenant || (int)$vendTenant !== (int)$tenant_id) {
+            echo json_encode(['success' => false, 'message' => 'Vendor does not belong to the selected tenant.']);
+            exit;
+        }
+
         try {
             if (empty($id)) {
                 $stmt = $pdo->prepare("INSERT INTO vendor_bills (tenant_id, vendor_id, bill_number, bill_date, due_date, subtotal, tax_rate, tax_amount, discount_amount, total_amount, notes, status, created_by) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)");
                 $stmt->execute([$tenant_id, $vendor_id, $bill_number, $bill_date, $due_date, $subtotal, $tax_rate, $tax_amount, $discount_amount, $total_amount, $notes, 'pending', $user_id]);
-                echo json_encode(['success' => true, 'message' => 'Bill added successfully']);
+                $new_bill_id = (int)$pdo->lastInsertId();
+                // Ledger: Dr Expense / Cr Accounts Payable (see AccountingService).
+                if (class_exists('AccountingService')) {
+                    try {
+                        $acc = new AccountingService($pdo, (int)$tenant_id, (int)$user_id);
+                        $acc->journalizeVendorBill($new_bill_id);
+                    } catch (Throwable $e) { error_log('[expenses_management save_bill journal] ' . $e->getMessage()); }
+                }
+                echo json_encode(['success' => true, 'message' => 'Bill added successfully', 'id' => $new_bill_id]);
             } else {
                 $stmt = $pdo->prepare("UPDATE vendor_bills SET vendor_id=?, bill_number=?, bill_date=?, due_date=?, subtotal=?, tax_rate=?, tax_amount=?, discount_amount=?, total_amount=?, notes=? WHERE id=?");
                 $stmt->execute([$vendor_id, $bill_number, $bill_date, $due_date, $subtotal, $tax_rate, $tax_amount, $discount_amount, $total_amount, $notes, $id]);
@@ -449,20 +480,55 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['ajax_action'])) {
             if (!$bill) {
                 throw new Exception('Bill not found');
             }
-            
+
+            // Super Admin tenant-scope guard: refuse bills from a different
+            // tenant when a specific tenant is selected.
+            if (function_exists('sa_selected_tenant_id_int')) {
+                $sa_scope = sa_selected_tenant_id_int();
+                if ($sa_scope > 0 && (int)$bill['tenant_id'] !== $sa_scope) {
+                    throw new Exception('Bill does not belong to the selected tenant.');
+                }
+            }
+
+            if ($amount <= 0) {
+                throw new Exception('Payment amount must be greater than zero');
+            }
+            $remaining = (float)$bill['total_amount'] - (float)$bill['amount_paid'];
+            if ($amount > $remaining + 0.001) {
+                throw new Exception('Payment ' . number_format($amount, 2) . ' exceeds remaining balance ' . number_format($remaining, 2) . ' on bill ' . $bill['bill_number']);
+            }
+
             $new_paid = $bill['amount_paid'] + $amount;
             $new_status = ($new_paid >= $bill['total_amount']) ? 'paid' : 'pending';
             
             // Insert payment record
             $stmt = $pdo->prepare("INSERT INTO bill_payments (tenant_id, bill_id, payment_date, amount, payment_method, reference_number, notes, created_by) VALUES (?,?,?,?,?,?,?,?)");
             $stmt->execute([$bill['tenant_id'], $bill_id, $payment_date, $amount, $payment_method, $reference_number, $notes, $user_id]);
-            
+            $new_pay_id = (int)$pdo->lastInsertId();
+
             // Update bill
             $stmt = $pdo->prepare("UPDATE vendor_bills SET amount_paid = ?, status = ? WHERE id = ?");
             $stmt->execute([$new_paid, $new_status, $bill_id]);
-            
+
+            // Ledger: Dr Accounts Payable / Cr Cash on Hand — the standard
+            // bill-payment double-entry. AccountingService.journalizePayment
+            // targets the `payments` table (customer/vendor unified), but
+            // this handler writes to `bill_payments`, so we post the entry
+            // directly here.
+            if (class_exists('AccountingService')) {
+                try {
+                    $acc = new AccountingService($pdo, (int)$bill['tenant_id'], (int)$user_id);
+                    $entry_num = 'BP-' . $bill['bill_number'] . '-' . $new_pay_id;
+                    $lines = [
+                        ['account_name' => 'Accounts Payable', 'account_code' => '2000', 'debit' => $amount, 'credit' => 0],
+                        ['account_name' => 'Cash on Hand',     'account_code' => '1010', 'debit' => 0,       'credit' => $amount],
+                    ];
+                    $acc->postToLedger($entry_num, $payment_date, "Bill payment: " . $bill['bill_number'], $lines, 'bill_payment', $new_pay_id);
+                } catch (Throwable $e) { error_log('[expenses_management bill_payment journal] ' . $e->getMessage()); }
+            }
+
             $pdo->commit();
-            echo json_encode(['success' => true, 'message' => 'Payment recorded successfully']);
+            echo json_encode(['success' => true, 'message' => 'Payment recorded successfully', 'new_paid' => $new_paid, 'new_status' => $new_status]);
         } catch (Exception $e) {
             $pdo->rollBack();
             echo json_encode(['success' => false, 'message' => $e->getMessage()]);
@@ -471,7 +537,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['ajax_action'])) {
     }
     
     if ($action === 'get_vendor_options') {
-        $tenant_filter = isset($_POST['tenant']) ? (int)$_POST['tenant'] : 0;
+        $tenant_filter = isset($_POST['tenant']) ? (int)$_POST['tenant'] : sa_selected_tenant_id_int();
         $where = "status = 'active'";
         $params = [];
         
@@ -490,7 +556,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['ajax_action'])) {
     }
     
     if ($action === 'get_dashboard_stats') {
-        $tenant_filter = isset($_POST['tenant']) ? (int)$_POST['tenant'] : 0;
+        $tenant_filter = isset($_POST['tenant']) ? (int)$_POST['tenant'] : sa_selected_tenant_id_int();
         $where = "";
         $params = [];
         
@@ -897,6 +963,116 @@ require_once __DIR__ . '/../includes/header.php';
 </div>
 
 <script src="https://code.jquery.com/jquery-3.6.0.min.js"></script>
+<script>
+// [csrf-shim] inline jQuery pages need the same ajaxSetup guard that
+// includes/footer.php installs. Attach X-CSRF-Token to every same-origin
+// mutation from this page.
+(function () {
+    var m = document.querySelector('meta[name="csrf-token"]');
+    if (!m || !window.jQuery) return;
+    var token = m.getAttribute('content') || '';
+    jQuery.ajaxSetup({
+        beforeSend: function (xhr, settings) {
+            var method = (settings.type || 'GET').toUpperCase();
+            if (method === 'GET' || method === 'HEAD' || method === 'OPTIONS') return;
+            if (settings.crossDomain) return;
+            xhr.setRequestHeader('X-CSRF-Token', token);
+            if (settings.data instanceof FormData && !settings.data.has('csrf_token')) {
+                settings.data.append('csrf_token', token);
+            }
+        }
+    });
+
+// [async-error-shim] Standardize AJAX failure handling so every finance
+// page shows a controlled error instead of a permanent spinner. This
+// runs after the jQuery.ajaxSetup shim above, so both live on the same
+// jQuery instance.
+(function () {
+    if (!window.jQuery) return;
+    if (window.__FIN_ASYNC_SHIM__) return;
+    window.__FIN_ASYNC_SHIM__ = true;
+    // Install an ajaxSend handler that marks the click-source button
+    // with data-finance-pending. Fires once per shim install.
+    if (!window.__FIN_SEND_MARK__) {
+        window.__FIN_SEND_MARK__ = true;
+        jQuery(document).on('ajaxSend', function (event, xhr, settings) {
+            try {
+                if (!settings || settings.crossDomain) return;
+                var el = document.activeElement;
+                if (!el) return;
+                var tag = (el.tagName || '').toUpperCase();
+                if (tag !== 'BUTTON' && !(tag === 'INPUT' && (el.type || '').toLowerCase() === 'submit')) return;
+                var $el = jQuery(el);
+                // If it isn't disabled at the moment ajax fires, the
+                // caller isn't gating this button on the request, so
+                // don't mark it.
+                if (!$el.prop('disabled')) return;
+                if ($el.attr('data-finance-pending') === '1') return;
+                if ($el.attr('data-original-html') === undefined) {
+                    $el.attr('data-original-html', $el.html());
+                }
+                $el.attr('data-finance-pending', '1');
+            } catch (e) {}
+        });
+    }
+    jQuery(document).ajaxError(function (event, xhr, settings, thrownError) {
+        // Skip cross-domain or explicitly-suppressed calls.
+        if (settings && settings.crossDomain) return;
+        if (settings && settings.suppressGlobalError) return;
+        var msg;
+        try {
+            var body = xhr && xhr.responseText ? xhr.responseText : '';
+            var parsed = null;
+            try { parsed = body ? JSON.parse(body) : null; } catch (e) {}
+            if (parsed && parsed.message) msg = parsed.message;
+            else if (xhr && xhr.status === 0) msg = 'Network error — request could not complete';
+            else if (xhr && xhr.status === 403) msg = 'Not authorized (403)';
+            else if (xhr && xhr.status === 404) msg = 'Endpoint not found (404)';
+            else if (xhr && xhr.status >= 500) msg = 'Server error (' + xhr.status + ')';
+            else msg = 'Request failed' + (xhr && xhr.status ? ' (' + xhr.status + ')' : '');
+        } catch (e) {
+            msg = 'Request failed';
+        }
+        // Try Bootstrap toast first if present; fall back to alert.
+        try {
+            if (window.jQuery && window.jQuery.fn && window.jQuery.fn.toast) {
+                var $c = jQuery('#toast-container');
+                if (!$c.length) {
+                    $c = jQuery('<div id="toast-container" style="position:fixed;top:20px;right:20px;z-index:99999;"></div>').appendTo('body');
+                }
+                var $t = jQuery('<div class="alert alert-danger" role="alert" style="min-width:280px;box-shadow:0 2px 8px rgba(0,0,0,.15);">' + jQuery('<div/>').text(msg).html() + '</div>');
+                $c.append($t);
+                setTimeout(function () { $t.fadeOut(400, function(){ jQuery(this).remove(); }); }, 5000);
+                return;
+            }
+        } catch (e) {}
+                // [async-error-shim-v3] Targeted UI-state recovery. Only restores
+        // buttons that were explicitly marked at ajaxSend time with
+        // data-finance-pending="1" and whose original HTML was captured
+        // in data-original-html. Never touches other disabled controls —
+        // tenant-validation locks, RBAC locks, workflow gates, and
+        // missing-required-selection blockers all stay locked as
+        // intended.
+        try {
+            jQuery('[data-finance-pending="1"]').each(function () {
+                var $b = jQuery(this);
+                var orig = $b.attr('data-original-html');
+                if (orig !== undefined && orig !== null) $b.html(orig);
+                $b.prop('disabled', false);
+                $b.removeAttr('data-finance-pending');
+                $b.removeAttr('data-original-html');
+            });
+        } catch (e) {}
+        // Only alert once per 5-second window to prevent alert-storms.
+        if (!window.__FIN_ALERT_LOCK__) {
+            window.__FIN_ALERT_LOCK__ = true;
+            try { window.alert(msg); } catch (e) {}
+            setTimeout(function () { window.__FIN_ALERT_LOCK__ = false; }, 5000);
+        }
+    });
+})();
+})();
+</script>
 <script src="https://cdn.jsdelivr.net/npm/bootstrap@4.5.2/dist/js/bootstrap.bundle.min.js"></script>
 <script>
 let currentTab = 'dashboard';

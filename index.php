@@ -69,12 +69,20 @@ if (isset($_SESSION['user_id'])) {
             padding: 0;
             box-sizing: border-box;
         }
-        
+
+        html, body {
+            overflow-x: hidden;
+        }
+
+        img {
+            max-width: 100%;
+            height: auto;
+        }
+
         body {
             font-family: 'Poppins', sans-serif;
             background: var(--curdun-violet);
             min-height: 100vh;
-            overflow-x: hidden;
         }
         
         /* Header Navigation */
@@ -83,18 +91,18 @@ if (isset($_SESSION['user_id'])) {
             top: 0;
             left: 0;
             right: 0;
-            padding: 20px 40px;
+            height: 96px;
+            padding: 0 32px;
             display: flex;
             justify-content: space-between;
             align-items: center;
             z-index: 1000;
             background: rgba(0, 0, 0, 0.3);
             backdrop-filter: blur(10px);
-            transition: all 0.3s ease;
+            transition: background 0.3s ease, box-shadow 0.3s ease;
         }
-        
+
         .navbar.scrolled {
-            padding: 15px 40px;
             background: rgba(45, 24, 89, 0.95);
             box-shadow: 0 2px 20px rgba(0, 0, 0, 0.1);
         }
@@ -102,23 +110,27 @@ if (isset($_SESSION['user_id'])) {
         .logo {
             display: flex;
             align-items: center;
-            gap: 10px;
+            gap: 12px;
+            flex: none;
         }
 
         .logo-icon {
-            width: fit-content;
-            padding: 6px 12px;
+            width: 200px;
+            max-width: 40vw;
+            padding: 5px 8px;
             background: white;
             border-radius: 10px;
             display: flex;
             align-items: center;
             justify-content: center;
             overflow: hidden;
+            flex: none;
         }
 
         .logo-img {
-            height: 30px;
-            width: auto;
+            display: block;
+            width: 100%;
+            height: auto;
             object-fit: contain;
         }
 
@@ -128,6 +140,7 @@ if (isset($_SESSION['user_id'])) {
             color: white;
             padding-left: 12px;
             border-left: 1px solid rgba(255, 255, 255, 0.25);
+            white-space: nowrap;
         }
 
         .logo-text span {
@@ -136,8 +149,9 @@ if (isset($_SESSION['user_id'])) {
         
         .nav-links {
             display: flex;
-            gap: 30px;
+            gap: 34px;
             align-items: center;
+            flex: none;
         }
         
         .nav-links a {
@@ -162,26 +176,24 @@ if (isset($_SESSION['user_id'])) {
         
         /* Main Container */
         .landing-container {
-            max-width: 1200px;
+            max-width: 1280px;
             margin: 0 auto;
-            padding: 100px 40px 60px;
+            padding: 0 28px 60px;
         }
-        
+
         /* Hero Section */
         .hero {
-            display: flex;
+            display: grid;
+            grid-template-columns: 1.05fr 0.95fr;
             align-items: center;
-            justify-content: space-between;
             gap: 50px;
-            margin-bottom: 100px;
-            flex-wrap: wrap;
+            padding: 156px 0 60px;
         }
-        
+
         .hero-content {
-            flex: 1;
             animation: fadeInLeft 0.8s ease;
         }
-        
+
         .hero-badge {
             background: rgba(245, 196, 16, 0.2);
             display: inline-block;
@@ -192,28 +204,29 @@ if (isset($_SESSION['user_id'])) {
             font-weight: 600;
             margin-bottom: 20px;
         }
-        
+
         .hero-content h1 {
-            font-size: 48px;
+            font-size: clamp(38px, 4.6vw, 60px);
             font-weight: 800;
             color: white;
             margin-bottom: 20px;
-            line-height: 1.2;
+            line-height: 1.1;
         }
-        
+
         .hero-content h1 span {
             color: var(--curdun-yellow);
         }
-        
+
         .hero-content p {
             font-size: 16px;
+            max-width: 620px;
             color: rgba(255, 255, 255, 0.85);
             margin-bottom: 30px;
-            line-height: 1.6;
+            line-height: 1.7;
         }
-        
+
         .hero-buttons {
-            display: flex;
+            display: inline-flex;
             gap: 20px;
             flex-wrap: wrap;
         }
@@ -257,14 +270,13 @@ if (isset($_SESSION['user_id'])) {
         }
         
         .hero-image {
-            flex: 1;
             animation: fadeInRight 0.8s ease;
             text-align: center;
         }
-        
+
         .hero-image i {
-            font-size: 280px;
-            color: rgba(255, 255, 255, 0.15);
+            font-size: clamp(180px, 18vw, 240px);
+            color: rgba(255, 255, 255, 0.22);
         }
         
         @keyframes fadeInLeft {
@@ -580,31 +592,83 @@ if (isset($_SESSION['user_id'])) {
         }
         
         /* Responsive */
+        /* Tablet */
+        @media (max-width: 1024px) {
+            .logo-icon {
+                width: 170px;
+            }
+
+            .nav-links {
+                gap: 24px;
+            }
+
+            .hero {
+                grid-template-columns: 1fr;
+                padding-top: 132px;
+                text-align: center;
+            }
+
+            .hero-content p {
+                margin-left: auto;
+                margin-right: auto;
+            }
+
+            .hero-buttons {
+                justify-content: center;
+            }
+
+            .hero-image {
+                order: 2;
+            }
+
+            .hero-image i {
+                font-size: clamp(140px, 30vw, 200px);
+            }
+        }
+
+        /* Mobile */
         @media (max-width: 768px) {
             .navbar {
-                padding: 15px 20px;
+                height: 76px;
+                padding: 0 20px;
             }
-            
+
+            .logo-icon {
+                width: 150px;
+                padding: 4px 8px;
+            }
+
+            .logo-text {
+                font-size: 14px;
+                padding-left: 8px;
+            }
+
             .nav-links {
                 display: none;
             }
-            
+
             .mobile-menu-btn {
                 display: block;
             }
-            
+
             .landing-container {
-                padding: 80px 20px 40px;
+                padding: 0 20px 40px;
             }
-            
+
+            .hero {
+                padding-top: 108px;
+                padding-bottom: 40px;
+                gap: 36px;
+            }
+
             .hero-content h1 {
                 font-size: 32px;
             }
-            
+
             .hero-image i {
-                font-size: 180px;
+                font-size: 150px;
             }
-            
+
             .section-title h2 {
                 font-size: 28px;
             }
@@ -642,7 +706,7 @@ if (isset($_SESSION['user_id'])) {
     <nav class="navbar" id="navbar">
         <div class="logo">
             <div class="logo-icon">
-    <img src="assets/images/curdun-logo1.png" alt="CURDUN ICT">
+    <img src="assets/images/curdun-logo1.png" alt="CURDUN ICT" class="logo-img">
 </div>
             <div class="logo-text">
              Cargo   <span>Management System</span>

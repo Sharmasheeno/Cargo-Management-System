@@ -88,9 +88,30 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['ajax_action'])) {
         }
         
         try {
+            // Reject duplicate account_code within the same tenant scope
+            // (or platform-global when tenant_id is NULL) — the schema
+            // does not enforce this, so we do it here.
+            $dupSql = "SELECT id FROM chart_of_accounts WHERE account_code = ? "
+                    . "AND ((? IS NULL AND tenant_id IS NULL) OR tenant_id = ?)";
+            $dupParams = [$code, $tenant_id, $tenant_id];
+            if ($id && $id > 0) {
+                $dupSql .= " AND id <> ?";
+                $dupParams[] = $id;
+            }
+            $dupStmt = $db->prepare($dupSql);
+            $dupStmt->execute($dupParams);
+            if ($dupStmt->fetch()) {
+                echo json_encode(['success' => false, 'message' => "Xisaab code '$code' horay ayaa loo sameeyay"]);
+                exit();
+            }
+
             if ($id && $id > 0) {
                 $stmt = $db->prepare("UPDATE chart_of_accounts SET account_code = ?, account_name = ?, account_type = ? WHERE id = ? AND (tenant_id = ? OR tenant_id IS NULL)");
                 $success = $stmt->execute([$code, $name, $type, $id, $tenant_id]);
+                if ($success && $stmt->rowCount() === 0) {
+                    echo json_encode(['success' => false, 'message' => 'Xisaabta lama helin ama waa la beddeli waayay']);
+                    exit();
+                }
             } else {
                 $stmt = $db->prepare("INSERT INTO chart_of_accounts (tenant_id, account_code, account_name, account_type) VALUES (?, ?, ?, ?)");
                 $success = $stmt->execute([$tenant_id, $code, $name, $type]);

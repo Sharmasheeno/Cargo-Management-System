@@ -10,17 +10,16 @@ if (session_status() === PHP_SESSION_NONE) {
 }
 
 require_once __DIR__ . '/../config/db_connect.php';
+require_once __DIR__ . '/../includes/shipment_functions.php';
 
 if (!isset($pdo) || !$pdo instanceof PDO) {
     die('Database connection failed: $pdo not found. Check config/db_connect.php');
 }
 
 // Only staff accounts may access this page.
-// NOTE: login.php stores the sub-role (role_type) into $_SESSION['role'] as an alias, so a
-// plain === 'staff' check only matches the generic staff account and would incorrectly lock
-// out every staff sub-role. Check role_type (falling back to role) against the known staff
-// role_types instead -- same pattern applied to the 4 existing base staff pages.
-$staff_role_types = ['staff', 'warehouse_supervisor', 'logistics_supervisor', 'finance_manager', 'clerk'];
+// See staffFamilyRoleTypes() / staffLogisticsRoleTypes() in includes/functions.php.
+require_once __DIR__ . '/../includes/functions.php';
+$staff_role_types = staffFamilyRoleTypes();
 $current_role_type = $_SESSION['role_type'] ?? $_SESSION['role'] ?? '';
 if (!isset($_SESSION['user_id']) || !in_array($current_role_type, $staff_role_types, true)) {
     header("Location: ../login.php");
@@ -28,7 +27,7 @@ if (!isset($_SESSION['user_id']) || !in_array($current_role_type, $staff_role_ty
 }
 
 // Only warehouse_supervisor / logistics_supervisor role_types are permitted on this page
-if (!in_array($current_role_type, ['warehouse_supervisor', 'logistics_supervisor'], true)) {
+if (!in_array($current_role_type, staffLogisticsRoleTypes(), true)) {
     header("Location: ../staff/dashboard.php?error=access_denied");
     exit;
 }
@@ -253,8 +252,19 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['ajax_action'])) {
                         </td>
                         <td>
                             <button class="btn btn-sm btn-info view-trip" data-id="<?= (int)$r['id'] ?>" title="View"><i class="fas fa-eye"></i></button>
-                            <?php if ($r['status'] !== 'completed'): ?>
+                            <?php
+                            // Custody: origin Logistics Supervisor only advances the trip up to
+                            // in_transit on an inter-branch trip. From in_transit onward the
+                            // driver (confirm_arrival) and destination Warehouse Supervisor
+                            // (staff/incoming_trips.php receive_shipment) own the transitions.
+                            $__interBranch = !empty($r['to_branch_id']) && (int)($r['from_branch_id'] ?? 0) !== (int)$r['to_branch_id'];
+                            $__canAdvance = ($r['status'] !== 'completed')
+                                && !($__interBranch && in_array($r['status'], ['in_transit','delivered'], true));
+                            ?>
+                            <?php if ($__canAdvance): ?>
                                 <button class="btn btn-sm btn-primary advance-trip" data-id="<?= (int)$r['id'] ?>" data-status="<?= h($r['status']) ?>" title="Advance Status"><i class="fas fa-forward"></i></button>
+                            <?php elseif ($__interBranch && $r['status'] === 'in_transit'): ?>
+                                <small class="text-muted d-inline-block" title="Destination warehouse will receive"><i class="fas fa-lock"></i> Destination custody</small>
                             <?php endif; ?>
                             <button class="btn btn-sm btn-secondary edit-trip" data-id="<?= (int)$r['id'] ?>" title="Edit Driver/Truck"><i class="fas fa-edit"></i></button>
                         </td>
@@ -282,21 +292,23 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['ajax_action'])) {
     }
 
     if ($action === 'get_branch_containers') {
-        // Containers in this branch, with the authoritative used-CBM total
-        // derived from the cargo_manifest_items rows so the New Trip form can
-        // populate Total CBM from the actual loaded cargo (not the container's
-        // maximum capacity).
+        // Active containers in this branch with manifest cargo and no active/final trip.
         $stmt = $pdo->prepare("
-            SELECT c.id, c.container_number, c.status,
-                   COALESCE((
-                       SELECT SUM(cmi.cbm_used)
-                       FROM cargo_manifest_items cmi
-                       WHERE cmi.container_id = c.id
-                         AND cmi.tenant_id = c.tenant_id
-                         AND cmi.master_shipment_id IS NOT NULL
-                   ), 0) AS used_cbm
+            SELECT c.id, c.container_number, c.status, COALESCE(mt.shipment_count,0) shipment_count, COALESCE(mt.used_cbm,0) used_cbm
             FROM containers c
+            JOIN (
+                SELECT tenant_id, container_id, COUNT(DISTINCT master_shipment_id) shipment_count, COALESCE(SUM(cbm_used),0) used_cbm
+                FROM cargo_manifest_items
+                WHERE master_shipment_id IS NOT NULL
+                GROUP BY tenant_id, container_id
+            ) mt ON mt.tenant_id = c.tenant_id AND mt.container_id = c.id
             WHERE c.tenant_id = ? AND c.current_branch_id = ?
+              AND c.status IN ('loading','loaded')
+              AND NOT EXISTS (
+                  SELECT 1 FROM trucking_trips t
+                  WHERE t.tenant_id = c.tenant_id AND t.container_id = c.id
+                    AND t.status IN ('pending','received','loading','loaded','in_transit','delivered','completed')
+              )
             ORDER BY c.created_at DESC
             LIMIT 100
         ");
@@ -306,32 +318,113 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['ajax_action'])) {
 
     if ($action === 'get_trip') {
         $id = postInt('id');
+        // Approver/dispatcher joins are TENANT-scoped on the users side so a
+        // trip in tenant 36 can never expose a name from another tenant even
+        // if the approved_by/dispatched_by column somehow held a foreign id.
         $stmt = $pdo->prepare("
-            SELECT t.*, c.container_number, fb.branch_name AS from_branch_name, tb.branch_name AS to_branch_name
+            SELECT t.*, c.container_number, c.status AS container_status, c.size_cbm,
+                   fb.branch_name AS from_branch_name, tb.branch_name AS to_branch_name,
+                   ua.full_name AS approver_name, ua.role_type AS approver_role,
+                   ud.full_name AS dispatcher_name, ud.role_type AS dispatcher_role,
+                   ur.full_name AS receiver_name, ur.role_type AS receiver_role
             FROM trucking_trips t
             LEFT JOIN containers c ON t.container_id = c.id
             LEFT JOIN branches fb ON t.from_branch_id = fb.id
             LEFT JOIN branches tb ON t.to_branch_id = tb.id
+            LEFT JOIN users ua ON ua.id = t.approved_by AND ua.tenant_id = t.tenant_id
+            LEFT JOIN users ud ON ud.id = t.dispatched_by AND ud.tenant_id = t.tenant_id
+            LEFT JOIN users ur ON ur.id = t.received_by AND ur.tenant_id = t.tenant_id
             WHERE t.id = ? AND t.tenant_id = ? AND (t.branch_id = ? OR t.from_branch_id = ? OR t.to_branch_id = ?)
             LIMIT 1
         ");
         $stmt->execute([$id, $tenant_id, $assigned_branch_id, $assigned_branch_id, $assigned_branch_id]);
         $trip = $stmt->fetch(PDO::FETCH_ASSOC);
         if (!$trip) jsonOut(['success' => false, 'message' => 'Trip not found or not in your branch.']);
+        // Human-readable role display shared with the approval/dispatch UI.
+        $roleDisplay = function(?string $rt): string {
+            $map = [
+                'branch_manager' => 'Branch Manager',
+                'logistics_supervisor' => 'Logistics Supervisor',
+                'warehouse_supervisor' => 'Warehouse Supervisor',
+                'reception_clerk' => 'Reception Clerk',
+                'finance_manager' => 'Finance Manager',
+                'delivery_agent' => 'Courier',
+                'driver' => 'Driver',
+                'clerk' => 'Assistant Worker',
+                'tenant_admin' => 'Tenant Admin',
+                'superadmin' => 'Super Admin',
+            ];
+            return $map[(string)$rt] ?? ucwords(str_replace('_', ' ', (string)$rt));
+        };
+        $totals = !empty($trip['container_id']) ? container_manifest_totals((int)$trip['container_id'], $tenant_id) : ['shipment_count'=>0,'total_quantity'=>0,'used_cbm'=>0,'weight_kg'=>0];
+        $man = $pdo->prepare("
+            SELECT cmi.quantity, cmi.cbm_used, cmi.weight_kg,
+                   s.shipment_number, s.tracking_number, s.cargo_description, s.quantity_unit, s.current_status,
+                   ob.branch_name AS origin_name, db.branch_name AS destination_name
+            FROM cargo_manifest_items cmi
+            JOIN shipments s ON s.id = cmi.master_shipment_id AND s.tenant_id = cmi.tenant_id
+            LEFT JOIN branches ob ON ob.id = s.origin_branch_id
+            LEFT JOIN branches db ON db.id = s.destination_branch_id
+            WHERE cmi.container_id = ? AND cmi.tenant_id = ?
+            ORDER BY cmi.id DESC
+        ");
+        $man->execute([(int)$trip['container_id'], $tenant_id]);
+        $manifestRows = $man->fetchAll(PDO::FETCH_ASSOC);
 
         global $trip_status_labels;
         ob_start(); ?>
         <div class="mb-2"><strong>Trip:</strong> <?= h($trip['trip_number']) ?></div>
-        <div class="mb-2"><strong>Container:</strong> <?= h($trip['container_number'] ?? '-') ?></div>
+        <div class="mb-2"><strong>Container:</strong> <?= h($trip['container_number'] ?? '-') ?> <?= !empty($trip['container_status']) ? '(' . h($trip['container_status']) . ')' : '' ?></div>
         <div class="mb-2"><strong>Status:</strong> <?= h($trip_status_labels[$trip['status']] ?? $trip['status']) ?></div>
+        <?php
+        $__appr = (string)($trip['approval_status'] ?? 'not_required');
+        $__approvalLabels = ['not_required'=>'Not required','pending_approval'=>'Awaiting Approval','approved'=>'Approved','rejected'=>'Rejected'];
+        ?>
+        <div class="mb-2"><strong>Approval:</strong> <?= h($__approvalLabels[$__appr] ?? $__appr) ?></div>
+        <?php if ($__appr === 'approved' && !empty($trip['approved_by'])): ?>
+            <div class="mb-2"><strong>Approved By:</strong> <?= h(($trip['approver_name'] ?? '(user removed)')) ?> &mdash; <?= h($roleDisplay($trip['approver_role'] ?? '')) ?></div>
+            <div class="mb-2"><strong>Approved At:</strong> <?= h($trip['approved_at'] ?? '-') ?></div>
+        <?php elseif ($__appr === 'rejected' && !empty($trip['approved_by'])): ?>
+            <div class="mb-2"><strong>Rejected By:</strong> <?= h(($trip['approver_name'] ?? '(user removed)')) ?> &mdash; <?= h($roleDisplay($trip['approver_role'] ?? '')) ?></div>
+            <div class="mb-2"><strong>Rejected At:</strong> <?= h($trip['approved_at'] ?? '-') ?></div>
+        <?php endif; ?>
         <div class="mb-2"><strong>Route:</strong> <?= h($trip['from_branch_name'] ?? '-') ?> &rarr; <?= h($trip['to_branch_name'] ?? '-') ?></div>
         <div class="mb-2"><strong>Driver:</strong> <?= h($trip['driver_name'] ?? '-') ?> <?= h($trip['driver_phone'] ?? '') ?></div>
         <div class="mb-2"><strong>Truck Plate:</strong> <?= h($trip['truck_plate'] ?? '-') ?></div>
-        <div class="mb-2"><strong>Total CBM:</strong> <?= number_format((float)($trip['total_cbm'] ?? 0), 2) ?></div>
+        <div class="mb-2"><strong>Manifest:</strong> <?= number_format($totals['shipment_count']) ?> shipments / <?= number_format($totals['total_quantity']) ?> qty / <?= number_format($totals['used_cbm'], 2) ?> CBM / <?= number_format($totals['weight_kg'], 2) ?> kg</div>
         <div class="mb-2"><strong>Loaded At:</strong> <?= h($trip['loaded_at'] ?? '-') ?></div>
         <div class="mb-2"><strong>Departed At:</strong> <?= h($trip['departed_at'] ?? '-') ?></div>
+        <?php if (!empty($trip['dispatched_by'])): ?>
+            <div class="mb-2"><strong>Dispatched By:</strong> <?= h(($trip['dispatcher_name'] ?? '(user removed)')) ?> &mdash; <?= h($roleDisplay($trip['dispatcher_role'] ?? '')) ?></div>
+        <?php elseif (!empty($trip['departed_at'])): ?>
+            <div class="mb-2 text-muted"><small><em>Dispatcher not recorded (departed before the audit column existed).</em></small></div>
+        <?php endif; ?>
+        <?php if (!empty($trip['arrived_at'])): ?>
+            <div class="mb-2"><strong>Arrived At:</strong> <?= h($trip['arrived_at']) ?></div>
+        <?php endif; ?>
+        <?php if (!empty($trip['received_by'])): ?>
+            <div class="mb-2"><strong>Received By:</strong> <?= h(($trip['receiver_name'] ?? '(user removed)')) ?> &mdash; <?= h($roleDisplay($trip['receiver_role'] ?? '')) ?></div>
+            <div class="mb-2"><strong>Completed At:</strong> <?= h($trip['arrived_at'] ?? '-') ?></div>
+        <?php endif; ?>
         <div class="mb-2"><strong>Delivered At:</strong> <?= h($trip['delivered_at'] ?? '-') ?></div>
         <div class="mb-2"><strong>Notes:</strong> <?= nl2br(h($trip['notes'] ?? '-')) ?></div>
+        <hr><h6>Trip Manifest</h6>
+        <div class="table-responsive"><table class="table table-sm table-bordered">
+            <thead><tr><th>Shipment</th><th>Tracking</th><th>Cargo</th><th>Qty</th><th>CBM</th><th>Weight</th><th>Route</th><th>Status</th></tr></thead>
+            <tbody>
+            <?php if ($manifestRows): foreach ($manifestRows as $m): ?>
+                <tr>
+                    <td><?= h($m['shipment_number']) ?></td><td><?= h($m['tracking_number']) ?></td><td><?= h($m['cargo_description']) ?></td>
+                    <td><?= (int)$m['quantity'] ?> <?= h($m['quantity_unit'] ?: 'Cartons') ?></td>
+                    <td><?= number_format((float)$m['cbm_used'], 4) ?></td><td><?= number_format((float)$m['weight_kg'], 2) ?></td>
+                    <td><?= h(($m['origin_name'] ?: '-') . ' → ' . ($m['destination_name'] ?: '-')) ?></td>
+                    <td><?= h($m['current_status']) ?></td>
+                </tr>
+            <?php endforeach; else: ?>
+                <tr><td colspan="8" class="text-center text-muted">No shipments on this trip container.</td></tr>
+            <?php endif; ?>
+            </tbody>
+        </table></div>
         <?php
         jsonOut(['success' => true, 'html' => ob_get_clean(), 'trip' => $trip]);
     }
@@ -347,10 +440,37 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['ajax_action'])) {
 
         if ($container_id <= 0) jsonOut(['success' => false, 'message' => 'Please select a container.']);
 
-        $check = $pdo->prepare("SELECT id, status FROM containers WHERE id = ? AND tenant_id = ? AND current_branch_id = ? LIMIT 1");
+        $check = $pdo->prepare("SELECT id, status, container_number FROM containers WHERE id = ? AND tenant_id = ? AND current_branch_id = ? LIMIT 1");
         $check->execute([$container_id, $tenant_id, $assigned_branch_id]);
-        if (!$check->fetch(PDO::FETCH_ASSOC)) {
+        $container = $check->fetch(PDO::FETCH_ASSOC);
+        if (!$container) {
             jsonOut(['success' => false, 'message' => 'Container not found in your branch.']);
+        }
+        if (!in_array((string)$container['status'], ['loading','loaded'], true)) {
+            jsonOut(['success' => false, 'message' => 'Only loading/loaded containers with manifest cargo can be assigned to a trip.']);
+        }
+        $totals = container_manifest_totals($container_id, $tenant_id);
+        if ($totals['shipment_count'] <= 0) {
+            jsonOut(['success' => false, 'message' => 'Cannot create a trip for an empty container.']);
+        }
+        if (container_has_active_trip($container_id, $tenant_id) || container_has_final_trip($container_id, $tenant_id)) {
+            jsonOut(['success' => false, 'message' => "Container {$container['container_number']} is already assigned to a trip or historical completed trip."]);
+        }
+
+        // trucking_trips.driver_id references drivers.id (not users.id).
+        $driver_id = null;
+        if ($driver_name !== '') {
+            $du = $pdo->prepare("SELECT d.id FROM drivers d
+                                 INNER JOIN users u ON u.id = d.user_id AND u.tenant_id = d.tenant_id
+                                 WHERE d.tenant_id = ? AND d.is_active = 1
+                                   AND u.is_active = 1 AND u.role_type = 'driver'
+                                   AND (d.full_name LIKE ? OR u.full_name LIKE ?)
+                                 LIMIT 1");
+            $driverLike = "%{$driver_name}%";
+            $du->execute([$tenant_id, $driverLike, $driverLike]);
+            $found = $du->fetchColumn();
+            if (!$found) jsonOut(['success' => false, 'message' => 'Select an active driver profile linked to a driver account.']);
+            $driver_id = (int)$found;
         }
 
         try {
@@ -358,40 +478,55 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['ajax_action'])) {
             // Branch policy: inter-branch trips require Branch Manager dispatch
             // approval before they may depart. Intra-branch movements do not.
             $approval_status = $to_branch_id && (int)$to_branch_id !== $assigned_branch_id ? 'pending_approval' : 'not_required';
+            $pdo->beginTransaction();
             $stmt = $pdo->prepare("
                 INSERT INTO trucking_trips
-                (tenant_id, container_id, trip_number, total_cbm, status, driver_name, driver_phone, truck_plate, notes, from_branch_id, to_branch_id, branch_id, approval_status, created_at)
-                VALUES (?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?, ?, NOW())
+                (tenant_id, container_id, trip_number, total_cbm, status, driver_id, driver_name, driver_phone, truck_plate, notes, from_branch_id, to_branch_id, branch_id, approval_status, created_at)
+                VALUES (?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW())
             ");
             $stmt->execute([
-                $tenant_id, $container_id, $trip_number, $total_cbm,
-                $driver_name ?: null, $driver_phone ?: null, $truck_plate ?: null, $notes ?: null,
+                $tenant_id, $container_id, $trip_number, $totals['used_cbm'],
+                $driver_id, $driver_name ?: null, $driver_phone ?: null, $truck_plate ?: null, $notes ?: null,
                 $assigned_branch_id, $to_branch_id, $assigned_branch_id, $approval_status
             ]);
+            $tripId = (int)$pdo->lastInsertId();
+            $pdo->prepare("UPDATE containers SET status = 'loaded', updated_at = NOW() WHERE id = ? AND tenant_id = ?")
+                ->execute([$container_id, $tenant_id]);
+            // Trip creation LINKS shipments to the trip but must NOT dispatch
+            // them: physical departure only happens after Branch Manager
+            // approval and an explicit Logistics Supervisor dispatch.
+            // Shipments therefore remain at LOADED here; current_trip_id and
+            // current_container_id are wired so tracking shows the assignment.
+            $shipStmt = $pdo->prepare("
+                SELECT s.id FROM cargo_manifest_items cmi
+                JOIN shipments s ON s.id = cmi.master_shipment_id AND s.tenant_id = cmi.tenant_id
+                WHERE cmi.container_id = ? AND cmi.tenant_id = ? AND s.current_status = 'LOADED'
+            ");
+            $shipStmt->execute([$container_id, $tenant_id]);
+            while ($sid = $shipStmt->fetchColumn()) {
+                update_shipment_status((int)$sid, 'LOADED', [
+                    'tenant_id' => $tenant_id,
+                    'force' => true,
+                    'current_trip_id' => $tripId,
+                    'current_container_id' => $container_id,
+                    'branch_id' => $assigned_branch_id,
+                    'container_id' => $container_id,
+                    'trip_id' => $tripId,
+                    'event_type' => 'ASSIGNED_TO_TRIP',
+                    'performed_by' => $user_id,
+                    'performer_name' => $user_name,
+                    'notes' => "Assigned to trip {$trip_number}.",
+                ]);
+            }
+            $pdo->commit();
             $msg = "Trip {$trip_number} created.";
             if ($approval_status === 'pending_approval') {
                 $msg .= ' Awaiting Branch Manager dispatch approval before departure.';
             }
 
-            // Link the authenticated Driver account (requirement #16): match the
-            // entered driver name against active driver users of this tenant so
-            // Hassan sees the trip in his own portal.
-            $driver_id = null;
-            if ($driver_name !== '') {
-                try {
-                    $du = $pdo->prepare("SELECT id FROM users WHERE tenant_id = ? AND is_active = 1 AND role_type = 'driver' AND full_name LIKE ? LIMIT 1");
-                    $du->execute([$tenant_id, "%{$driver_name}%"]);
-                    $found = $du->fetchColumn();
-                    if ($found) {
-                        $driver_id = (int)$found;
-                        $pdo->prepare("UPDATE trucking_trips SET driver_id = ? WHERE trip_number = ? AND tenant_id = ?")
-                            ->execute([$driver_id, $trip_number, $tenant_id]);
-                    }
-                } catch (Throwable $e) {}
-            }
-
-            jsonOut(['success' => true, 'message' => $msg . ($driver_id ? " Assigned to driver account #{$driver_id}." : ''), 'id' => (int)$pdo->lastInsertId()]);
+            jsonOut(['success' => true, 'message' => $msg . ($driver_id ? " Assigned to driver account #{$driver_id}." : ''), 'id' => $tripId]);
         } catch (Throwable $e) {
+            if ($pdo->inTransaction()) $pdo->rollBack();
             jsonOut(['success' => false, 'message' => 'Error: ' . $e->getMessage()]);
         }
     }
@@ -403,14 +538,14 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['ajax_action'])) {
         $truck_plate = postString('truck_plate');
         $notes = postString('notes');
 
-        $check = $pdo->prepare("SELECT id, container_id FROM trucking_trips WHERE id = ? AND tenant_id = ? AND (branch_id = ? OR from_branch_id = ? OR to_branch_id = ?) LIMIT 1");
+        $check = $pdo->prepare("SELECT id, status, container_id FROM trucking_trips WHERE id = ? AND tenant_id = ? AND (branch_id = ? OR from_branch_id = ? OR to_branch_id = ?) LIMIT 1");
         $check->execute([$id, $tenant_id, $assigned_branch_id, $assigned_branch_id, $assigned_branch_id]);
         $existingTrip = $check->fetch(PDO::FETCH_ASSOC);
         if (!$existingTrip) jsonOut(['success' => false, 'message' => 'Trip not found in your branch.']);
+        if ((string)$existingTrip['status'] === 'completed') jsonOut(['success' => false, 'message' => 'Completed trips are historical and cannot be edited.']);
 
         // Total CBM is derived from the container's authoritative manifest
         // totals, not from the browser payload. A POSTed total_cbm is ignored.
-        require_once __DIR__ . '/../includes/shipment_functions.php';
         $__cont = (int)($existingTrip['container_id'] ?? 0);
         $__totals = $__cont > 0
             ? container_manifest_totals($__cont, $tenant_id)
@@ -440,24 +575,45 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['ajax_action'])) {
         try {
             $pdo->beginTransaction();
             // Only the origin branch (or the trip's owning branch) may advance a trip's
-            // lifecycle status. The destination branch participates through its own
-            // warehouse receive/handover flows and must not mutate the trip record.
-            $stmt = $pdo->prepare("SELECT status FROM trucking_trips WHERE id = ? AND tenant_id = ? AND (branch_id = ? OR from_branch_id = ?) FOR UPDATE");
+            // lifecycle status. Destination-branch access is restricted to their own
+            // warehouse receive/handover flows, not to mutating the trip record itself.
+            $stmt = $pdo->prepare("SELECT id, status, container_id, approval_status, from_branch_id, to_branch_id FROM trucking_trips WHERE id = ? AND tenant_id = ? AND (branch_id = ? OR from_branch_id = ?) FOR UPDATE");
             $stmt->execute([$id, $tenant_id, $assigned_branch_id, $assigned_branch_id]);
             $trip = $stmt->fetch(PDO::FETCH_ASSOC);
             if (!$trip) { $pdo->rollBack(); jsonOut(['success' => false, 'message' => 'Trip not found in your branch.']); }
+            if ((string)$trip['status'] === 'completed') {
+                $pdo->rollBack();
+                jsonOut(['success' => false, 'message' => 'Completed trips are historical and read-only.']);
+            }
+            $totals = !empty($trip['container_id']) ? container_manifest_totals((int)$trip['container_id'], $tenant_id) : ['shipment_count' => 0];
+            if ($totals['shipment_count'] <= 0) {
+                $pdo->rollBack();
+                jsonOut(['success' => false, 'message' => 'Trip container has no manifest cargo.']);
+            }
 
             if (!canMoveTripForward((string)$trip['status'], $new_status)) {
                 $pdo->rollBack();
                 jsonOut(['success' => false, 'message' => 'Cannot move status backward or repeat current status.']);
             }
 
+            // Custody gate: on an INTER-branch trip the origin Logistics
+            // Supervisor cannot attest destination arrival or completion --
+            // the destination Warehouse Supervisor owns receive/close on
+            // staff/incoming_trips.php, and the driver owns physical arrival
+            // via driver/index.php confirm_arrival. Rejecting these here
+            // prevents the previous bypass where an origin actor moved the
+            // trip through 'delivered' / 'completed' without any real
+            // destination custody being taken.
+            $isInterBranch = !empty($trip['to_branch_id']) && (int)$trip['from_branch_id'] !== (int)$trip['to_branch_id'];
+            if ($isInterBranch && in_array($new_status, ['delivered','completed'], true)) {
+                $pdo->rollBack();
+                jsonOut(['success' => false, 'message' => 'This trip must be received by the destination warehouse before completion.']);
+            }
+
             // Dispatch approval gate: a trip awaiting (or refused) Branch
             // Manager approval may not depart the origin branch.
             if ($new_status === 'in_transit') {
-                $apprStmt = $pdo->prepare("SELECT COALESCE(approval_status, 'not_required') FROM trucking_trips WHERE id = ?");
-                $apprStmt->execute([$id]);
-                $approval = (string)$apprStmt->fetchColumn();
+                $approval = (string)($trip['approval_status'] ?? 'not_required');
                 if ($approval === 'pending_approval') {
                     $pdo->rollBack();
                     jsonOut(['success' => false, 'message' => 'Dispatch not yet approved by the Branch Manager. Approval is required before departure.']);
@@ -474,12 +630,31 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['ajax_action'])) {
             elseif ($new_status === 'delivered') $timeCol = 'delivered_at';
             elseif ($new_status === 'completed') $timeCol = 'arrived_at';
 
-            if ($timeCol) {
+            if ($new_status === 'in_transit') {
+                // Dispatch audit: authoritatively persist the actor who moved
+                // the trip into IN_TRANSIT. This lets Trip Details show
+                // "Dispatched By" separately from the Branch Manager approval
+                // audit, so the separation of duties is visible.
+                $pdo->prepare("UPDATE trucking_trips SET status = ?, `$timeCol` = NOW(), dispatched_by = ?, updated_at = NOW() WHERE id = ? AND tenant_id = ?")
+                    ->execute([$new_status, $_SESSION['user_id'] ?? null, $id, $tenant_id]);
+            } elseif ($timeCol) {
                 $pdo->prepare("UPDATE trucking_trips SET status = ?, `$timeCol` = NOW(), updated_at = NOW() WHERE id = ? AND tenant_id = ?")
                     ->execute([$new_status, $id, $tenant_id]);
             } else {
                 $pdo->prepare("UPDATE trucking_trips SET status = ?, updated_at = NOW() WHERE id = ? AND tenant_id = ?")
                     ->execute([$new_status, $id, $tenant_id]);
+            }
+            if (!empty($trip['container_id'])) {
+                $containerStatus = null;
+                if ($new_status === 'loading') $containerStatus = 'loading';
+                elseif ($new_status === 'loaded') $containerStatus = 'loaded';
+                elseif ($new_status === 'in_transit') $containerStatus = 'dispatched';
+                elseif ($new_status === 'delivered') $containerStatus = 'ready';
+                elseif ($new_status === 'completed') $containerStatus = 'delivered';
+                if ($containerStatus !== null) {
+                    $pdo->prepare("UPDATE containers SET status = ?, updated_at = NOW() WHERE id = ? AND tenant_id = ?")
+                        ->execute([$containerStatus, (int)$trip['container_id'], $tenant_id]);
+                }
             }
 
             // --- Connected A→Z workflow: propagate the trip event onto every
@@ -600,6 +775,7 @@ require_once __DIR__ . '/../includes/header.php';
                     <select name="container_id" id="containerSelect" class="form-control" required>
                         <option value="">Loading containers...</option>
                     </select>
+                    <small id="noTripContainerHint" class="form-text text-muted" style="display:none;">No eligible containers are available. Create/load a new container before creating another trip.</small>
                 </div>
                 <div class="form-row">
                     <div class="form-group col-md-6">
@@ -731,6 +907,7 @@ function loadContainerOptions() {
             });
             $('#containerSelect').html(html);
             $('#createTotalCbm').val('0.00');
+            $('#noTripContainerHint').toggle((res.containers || []).length === 0);
         }
     }, 'json');
 }

@@ -18,6 +18,12 @@ $user_id = $_SESSION['user_id'];
 $user_name = $_SESSION['user_name'] ?? 'Admin';
 
 require_once __DIR__ . '/../config/db_connect.php';
+require_once __DIR__ . '/../includes/sa_scope.php';
+
+// Load AccountingService so tax settlement posts Dr Tax Payable / Cr Cash.
+if (file_exists(__DIR__ . '/../includes/AccountingService.php')) {
+    require_once __DIR__ . '/../includes/AccountingService.php';
+}
 
 // ==================== CREATE TABLES IF NOT EXISTS ====================
 try {
@@ -180,7 +186,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['ajax_action'])) {
     
     // ==================== TAX RATES ====================
     if ($action === 'get_tax_rates') {
-        $tenant_filter = isset($_POST['tenant']) ? (int)$_POST['tenant'] : 0;
+        $tenant_filter = isset($_POST['tenant']) ? (int)$_POST['tenant'] : sa_selected_tenant_id_int();
         $search = $_POST['search'] ?? '';
         
         $where = [];
@@ -356,7 +362,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['ajax_action'])) {
     
     // ==================== TAX RETURNS ====================
     if ($action === 'get_tax_returns') {
-        $tenant_filter = isset($_POST['tenant']) ? (int)$_POST['tenant'] : 0;
+        $tenant_filter = isset($_POST['tenant']) ? (int)$_POST['tenant'] : sa_selected_tenant_id_int();
         $search = $_POST['search'] ?? '';
         $status_filter = $_POST['status'] ?? '';
         
@@ -505,33 +511,69 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['ajax_action'])) {
     }
     
     if ($action === 'record_tax_payment') {
-        $return_id = $_POST['return_id'] ?? 0;
+        $return_id = (int)($_POST['return_id'] ?? 0);
         $amount = (float)($_POST['amount'] ?? 0);
         $payment_date = $_POST['payment_date'] ?? date('Y-m-d');
         $payment_reference = trim($_POST['payment_reference'] ?? '');
         $notes = trim($_POST['notes'] ?? '');
-        
+
+        if ($amount <= 0) {
+            echo json_encode(['success' => false, 'message' => 'Payment amount must be greater than zero']);
+            exit;
+        }
+
         try {
             $pdo->beginTransaction();
-            
+
             $stmt = $pdo->prepare("SELECT * FROM tax_returns WHERE id = ? FOR UPDATE");
             $stmt->execute([$return_id]);
             $return = $stmt->fetch(PDO::FETCH_ASSOC);
-            
+
             if (!$return) {
                 throw new Exception('Tax return not found');
             }
-            
+
+            // Overpay guard: cannot settle more than the outstanding balance.
+            $remaining = (float)$return['total_due'] - (float)$return['amount_paid'];
+            if ($amount > $remaining + 0.005) {
+                $pdo->rollBack();
+                echo json_encode([
+                    'success' => false,
+                    'message' => 'Payment ' . number_format($amount, 2)
+                        . ' exceeds remaining balance ' . number_format($remaining, 2)
+                        . ' on tax return ' . $return['id'],
+                ]);
+                exit;
+            }
+
             $new_paid = $return['amount_paid'] + $amount;
             $new_status = ($new_paid >= $return['total_due']) ? 'paid' : 'filed';
-            
+
             $stmt = $pdo->prepare("UPDATE tax_returns SET amount_paid = ?, payment_reference = ?, payment_date = ?, status = ? WHERE id = ?");
             $stmt->execute([$new_paid, $payment_reference, $payment_date, $new_status, $return_id]);
-            
+
+            // Ledger integration: settling tax reduces the Sales Tax Payable
+            // liability and the corresponding cash outflow.
+            //   Dr Sales Tax Payable (2100)
+            //   Cr Cash on Hand      (1010)
+            if (class_exists('AccountingService')) {
+                try {
+                    $acc = new AccountingService($pdo, (int)$return['tenant_id'], (int)$user_id);
+                    $entry_num = 'TAXPAY-' . $return['id'] . '-' . date('Ymd') . '-' . rand(100, 999);
+                    $lines = [
+                        ['account_name' => 'Sales Tax Payable', 'account_code' => '2100', 'debit' => $amount, 'credit' => 0],
+                        ['account_name' => 'Cash on Hand',      'account_code' => '1010', 'debit' => 0,       'credit' => $amount],
+                    ];
+                    $acc->postToLedger($entry_num, $payment_date, "Tax return settlement: return #{$return['id']}", $lines, 'tax_payment', $return['id']);
+                } catch (Throwable $e) {
+                    error_log('[tax record_tax_payment journal] ' . $e->getMessage());
+                }
+            }
+
             $pdo->commit();
-            echo json_encode(['success' => true, 'message' => 'Payment recorded successfully']);
+            echo json_encode(['success' => true, 'message' => 'Payment recorded successfully', 'new_paid' => $new_paid, 'new_status' => $new_status]);
         } catch (Exception $e) {
-            $pdo->rollBack();
+            if ($pdo->inTransaction()) $pdo->rollBack();
             echo json_encode(['success' => false, 'message' => $e->getMessage()]);
         }
         exit;
@@ -539,7 +581,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['ajax_action'])) {
     
     // ==================== TAX REPORTS ====================
     if ($action === 'get_tax_report') {
-        $tenant_filter = isset($_POST['tenant']) ? (int)$_POST['tenant'] : 0;
+        $tenant_filter = isset($_POST['tenant']) ? (int)$_POST['tenant'] : sa_selected_tenant_id_int();
         $year = (int)($_POST['year'] ?? date('Y'));
         $tax_type = $_POST['tax_type'] ?? '';
         
@@ -1174,6 +1216,116 @@ require_once __DIR__ . '/../includes/header.php';
 </div>
 
 <script src="https://code.jquery.com/jquery-3.6.0.min.js"></script>
+<script>
+// [csrf-shim] inline jQuery pages need the same ajaxSetup guard that
+// includes/footer.php installs. Attach X-CSRF-Token to every same-origin
+// mutation from this page.
+(function () {
+    var m = document.querySelector('meta[name="csrf-token"]');
+    if (!m || !window.jQuery) return;
+    var token = m.getAttribute('content') || '';
+    jQuery.ajaxSetup({
+        beforeSend: function (xhr, settings) {
+            var method = (settings.type || 'GET').toUpperCase();
+            if (method === 'GET' || method === 'HEAD' || method === 'OPTIONS') return;
+            if (settings.crossDomain) return;
+            xhr.setRequestHeader('X-CSRF-Token', token);
+            if (settings.data instanceof FormData && !settings.data.has('csrf_token')) {
+                settings.data.append('csrf_token', token);
+            }
+        }
+    });
+
+// [async-error-shim] Standardize AJAX failure handling so every finance
+// page shows a controlled error instead of a permanent spinner. This
+// runs after the jQuery.ajaxSetup shim above, so both live on the same
+// jQuery instance.
+(function () {
+    if (!window.jQuery) return;
+    if (window.__FIN_ASYNC_SHIM__) return;
+    window.__FIN_ASYNC_SHIM__ = true;
+    // Install an ajaxSend handler that marks the click-source button
+    // with data-finance-pending. Fires once per shim install.
+    if (!window.__FIN_SEND_MARK__) {
+        window.__FIN_SEND_MARK__ = true;
+        jQuery(document).on('ajaxSend', function (event, xhr, settings) {
+            try {
+                if (!settings || settings.crossDomain) return;
+                var el = document.activeElement;
+                if (!el) return;
+                var tag = (el.tagName || '').toUpperCase();
+                if (tag !== 'BUTTON' && !(tag === 'INPUT' && (el.type || '').toLowerCase() === 'submit')) return;
+                var $el = jQuery(el);
+                // If it isn't disabled at the moment ajax fires, the
+                // caller isn't gating this button on the request, so
+                // don't mark it.
+                if (!$el.prop('disabled')) return;
+                if ($el.attr('data-finance-pending') === '1') return;
+                if ($el.attr('data-original-html') === undefined) {
+                    $el.attr('data-original-html', $el.html());
+                }
+                $el.attr('data-finance-pending', '1');
+            } catch (e) {}
+        });
+    }
+    jQuery(document).ajaxError(function (event, xhr, settings, thrownError) {
+        // Skip cross-domain or explicitly-suppressed calls.
+        if (settings && settings.crossDomain) return;
+        if (settings && settings.suppressGlobalError) return;
+        var msg;
+        try {
+            var body = xhr && xhr.responseText ? xhr.responseText : '';
+            var parsed = null;
+            try { parsed = body ? JSON.parse(body) : null; } catch (e) {}
+            if (parsed && parsed.message) msg = parsed.message;
+            else if (xhr && xhr.status === 0) msg = 'Network error — request could not complete';
+            else if (xhr && xhr.status === 403) msg = 'Not authorized (403)';
+            else if (xhr && xhr.status === 404) msg = 'Endpoint not found (404)';
+            else if (xhr && xhr.status >= 500) msg = 'Server error (' + xhr.status + ')';
+            else msg = 'Request failed' + (xhr && xhr.status ? ' (' + xhr.status + ')' : '');
+        } catch (e) {
+            msg = 'Request failed';
+        }
+        // Try Bootstrap toast first if present; fall back to alert.
+        try {
+            if (window.jQuery && window.jQuery.fn && window.jQuery.fn.toast) {
+                var $c = jQuery('#toast-container');
+                if (!$c.length) {
+                    $c = jQuery('<div id="toast-container" style="position:fixed;top:20px;right:20px;z-index:99999;"></div>').appendTo('body');
+                }
+                var $t = jQuery('<div class="alert alert-danger" role="alert" style="min-width:280px;box-shadow:0 2px 8px rgba(0,0,0,.15);">' + jQuery('<div/>').text(msg).html() + '</div>');
+                $c.append($t);
+                setTimeout(function () { $t.fadeOut(400, function(){ jQuery(this).remove(); }); }, 5000);
+                return;
+            }
+        } catch (e) {}
+                // [async-error-shim-v3] Targeted UI-state recovery. Only restores
+        // buttons that were explicitly marked at ajaxSend time with
+        // data-finance-pending="1" and whose original HTML was captured
+        // in data-original-html. Never touches other disabled controls —
+        // tenant-validation locks, RBAC locks, workflow gates, and
+        // missing-required-selection blockers all stay locked as
+        // intended.
+        try {
+            jQuery('[data-finance-pending="1"]').each(function () {
+                var $b = jQuery(this);
+                var orig = $b.attr('data-original-html');
+                if (orig !== undefined && orig !== null) $b.html(orig);
+                $b.prop('disabled', false);
+                $b.removeAttr('data-finance-pending');
+                $b.removeAttr('data-original-html');
+            });
+        } catch (e) {}
+        // Only alert once per 5-second window to prevent alert-storms.
+        if (!window.__FIN_ALERT_LOCK__) {
+            window.__FIN_ALERT_LOCK__ = true;
+            try { window.alert(msg); } catch (e) {}
+            setTimeout(function () { window.__FIN_ALERT_LOCK__ = false; }, 5000);
+        }
+    });
+})();
+})();
+</script>
 <script src="https://cdn.jsdelivr.net/npm/bootstrap@4.5.2/dist/js/bootstrap.bundle.min.js"></script>
 <script>
 let currentTab = 'rates';

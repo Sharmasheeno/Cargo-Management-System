@@ -11,17 +11,16 @@ if (session_status() === PHP_SESSION_NONE) {
 }
 
 require_once __DIR__ . '/../config/db_connect.php';
+require_once __DIR__ . '/../includes/shipment_functions.php';
 
 if (!isset($pdo) || !$pdo instanceof PDO) {
     die('Database connection failed: $pdo not found. Check config/db_connect.php');
 }
 
 // Only staff accounts may access this page.
-// NOTE: login.php stores the sub-role (role_type) into $_SESSION['role'] as an alias, so a
-// plain === 'staff' check only matches the generic staff account and would incorrectly lock
-// out every staff sub-role. Check role_type (falling back to role) against the known staff
-// role_types instead -- same pattern applied to the 4 existing base staff pages.
-$staff_role_types = ['staff', 'warehouse_supervisor', 'logistics_supervisor', 'finance_manager', 'clerk'];
+// See staffFamilyRoleTypes() / staffLogisticsRoleTypes() in includes/functions.php.
+require_once __DIR__ . '/../includes/functions.php';
+$staff_role_types = staffFamilyRoleTypes();
 $current_role_type = $_SESSION['role_type'] ?? $_SESSION['role'] ?? '';
 if (!isset($_SESSION['user_id']) || !in_array($current_role_type, $staff_role_types, true)) {
     header("Location: ../login.php");
@@ -29,7 +28,7 @@ if (!isset($_SESSION['user_id']) || !in_array($current_role_type, $staff_role_ty
 }
 
 // Only warehouse_supervisor / logistics_supervisor role_types are permitted on this page
-if (!in_array($current_role_type, ['warehouse_supervisor', 'logistics_supervisor'], true)) {
+if (!in_array($current_role_type, staffLogisticsRoleTypes(), true)) {
     header("Location: ../staff/dashboard.php?error=access_denied");
     exit;
 }
@@ -213,7 +212,25 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['ajax_action'])) {
         $total = (int)($stmt->fetch(PDO::FETCH_ASSOC)['total'] ?? 0);
         $pages = max(1, (int)ceil($total / $limit));
 
-        $sql = "SELECT c.* FROM containers c $whereSql ORDER BY c.created_at DESC, c.id DESC LIMIT $limit OFFSET $offset";
+        $sql = "SELECT c.*,
+                       COALESCE(mt.used_cbm,0) AS derived_used_cbm,
+                       COALESCE(mt.weight_kg,0) AS derived_weight_kg,
+                       COALESCE(mt.shipment_count,0) AS shipment_count,
+                       COALESCE(mt.total_quantity,0) AS total_quantity,
+                       COALESCE(mt.missing_cbm_count,0) AS missing_cbm_count
+                FROM containers c
+                LEFT JOIN (
+                    SELECT cmi.container_id, cmi.tenant_id, COUNT(DISTINCT cmi.master_shipment_id) shipment_count,
+                           COALESCE(SUM(cmi.quantity),0) total_quantity,
+                           COALESCE(SUM(cmi.cbm_used),0) used_cbm,
+                           COALESCE(SUM(cmi.weight_kg),0) weight_kg,
+                           SUM(CASE WHEN COALESCE(s.volume_cbm,0) <= 0 THEN 1 ELSE 0 END) missing_cbm_count
+                    FROM cargo_manifest_items cmi
+                    LEFT JOIN shipments s ON s.id = cmi.master_shipment_id AND s.tenant_id = cmi.tenant_id
+                    WHERE cmi.master_shipment_id IS NOT NULL
+                    GROUP BY cmi.container_id, cmi.tenant_id
+                ) mt ON mt.container_id = c.id AND mt.tenant_id = c.tenant_id
+                $whereSql ORDER BY c.created_at DESC, c.id DESC LIMIT $limit OFFSET $offset";
         $stmt = $pdo->prepare($sql);
         $stmt->execute($params);
         $rows = $stmt->fetchAll(PDO::FETCH_ASSOC);
@@ -228,8 +245,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['ajax_action'])) {
                     <tr>
                         <th>Container #</th>
                         <th>Type</th>
-                        <th>CBM (used/total)</th>
+                        <th>CBM (used/remaining/total)</th>
                         <th>Weight (kg)</th>
+                        <th>Shipments / Qty</th>
                         <th>Seal / BL</th>
                         <th>Status</th>
                         <th>Actions</th>
@@ -246,8 +264,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['ajax_action'])) {
                             <div class="tiny text-muted"><?= h(date('d/m/Y', strtotime($r['created_at'] ?? 'now'))) ?></div>
                         </td>
                         <td class="text-uppercase"><?= h($r['container_type']) ?></td>
-                        <td><?= number_format((float)($r['size_used_cbm'] ?? 0), 2) ?> / <?= number_format((float)($r['size_cbm'] ?? 0), 2) ?></td>
-                        <td><?= number_format((float)($r['weight_kg'] ?? 0), 2) ?></td>
+                        <td><?= number_format((float)$r['derived_used_cbm'], 2) ?> / <?= number_format(max(0, (float)$r['size_cbm'] - (float)$r['derived_used_cbm']), 2) ?> / <?= number_format((float)($r['size_cbm'] ?? 0), 2) ?>
+                            <?php if ((int)$r['missing_cbm_count'] > 0): ?><br><small class="text-warning"><i class="fas fa-triangle-exclamation"></i> <?= (int)$r['missing_cbm_count'] ?> missing CBM</small><?php endif; ?>
+                        </td>
+                        <td><?= number_format((float)$r['derived_weight_kg'], 2) ?></td>
+                        <td><?= (int)$r['shipment_count'] ?> / <?= (int)$r['total_quantity'] ?></td>
                         <td><small><?= h($r['seal_number'] ?: '-') ?><br><?= h($r['bl_number'] ?: '-') ?></small></td>
                         <td><span class="badge" style="background:<?= h($color) ?>20;color:<?= h($color) ?>;border:1px solid <?= h($color) ?>"><?= h($label) ?></span></td>
                         <td>
@@ -261,7 +282,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['ajax_action'])) {
                         </td>
                     </tr>
                 <?php endforeach; else: ?>
-                    <tr><td colspan="7" class="text-center py-4 text-muted">No containers found for your branch</td></tr>
+                    <tr><td colspan="8" class="text-center py-4 text-muted">No containers found for your branch</td></tr>
                 <?php endif; ?>
                 </tbody>
             </table>
@@ -288,14 +309,41 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['ajax_action'])) {
         $stmt->execute([$id, $tenant_id, $assigned_branch_id]);
         $container = $stmt->fetch(PDO::FETCH_ASSOC);
         if (!$container) jsonOut(['success' => false, 'message' => 'Container not found or not in your branch.']);
+        $totals = container_manifest_totals($id, $tenant_id);
+        $tripStmt = $pdo->prepare("SELECT trip_number, status, approval_status FROM trucking_trips WHERE container_id = ? AND tenant_id = ? ORDER BY id DESC LIMIT 1");
+        $tripStmt->execute([$id, $tenant_id]);
+        $currentTrip = $tripStmt->fetch(PDO::FETCH_ASSOC);
+        $man = $pdo->prepare("
+            SELECT cmi.quantity, cmi.cbm_used, cmi.weight_kg, cmi.mogadishu_status,
+                   s.shipment_number, s.tracking_number, s.sender_name, s.receiver_name, s.receiver_phone,
+                   s.cargo_description, s.quantity_unit, s.current_status, s.volume_cbm,
+                   cu.customer_name,
+                   ob.branch_name AS origin_name, db.branch_name AS destination_name
+            FROM cargo_manifest_items cmi
+            JOIN shipments s ON s.id = cmi.master_shipment_id AND s.tenant_id = cmi.tenant_id
+            LEFT JOIN customers cu ON cu.id = s.customer_id AND cu.tenant_id = s.tenant_id
+            LEFT JOIN branches ob ON ob.id = s.origin_branch_id
+            LEFT JOIN branches db ON db.id = s.destination_branch_id
+            WHERE cmi.container_id = ? AND cmi.tenant_id = ?
+            ORDER BY cmi.id DESC
+        ");
+        $man->execute([$id, $tenant_id]);
+        $manifestRows = $man->fetchAll(PDO::FETCH_ASSOC);
+        $missingCbmCount = 0;
+        foreach ($manifestRows as $mr) {
+            if ((float)$mr['cbm_used'] <= 0) $missingCbmCount++;
+        }
 
         global $container_status_labels;
         ob_start(); ?>
         <div class="mb-2"><strong>Container:</strong> <?= h($container['container_number']) ?></div>
         <div class="mb-2"><strong>Type:</strong> <span class="text-uppercase"><?= h($container['container_type']) ?></span></div>
         <div class="mb-2"><strong>Status:</strong> <?= h($container_status_labels[$container['status']] ?? $container['status']) ?></div>
-        <div class="mb-2"><strong>CBM:</strong> <?= number_format((float)($container['size_used_cbm'] ?? 0), 2) ?> / <?= number_format((float)($container['size_cbm'] ?? 0), 2) ?></div>
-        <div class="mb-2"><strong>Weight:</strong> <?= number_format((float)($container['weight_kg'] ?? 0), 2) ?> kg</div>
+        <div class="mb-2"><strong>CBM:</strong> <?= number_format($totals['used_cbm'], 2) ?> used / <?= number_format(max(0, (float)$container['size_cbm'] - $totals['used_cbm']), 2) ?> remaining / <?= number_format((float)($container['size_cbm'] ?? 0), 2) ?> total</div>
+        <?php if ($missingCbmCount > 0): ?><div class="alert alert-warning py-2"><i class="fas fa-triangle-exclamation"></i> <?= (int)$missingCbmCount ?> manifest shipment<?= $missingCbmCount === 1 ? '' : 's' ?> has missing/zero CBM. Capacity is shown truthfully from available shipment measurements.</div><?php endif; ?>
+        <div class="mb-2"><strong>Weight:</strong> <?= number_format($totals['weight_kg'], 2) ?> kg</div>
+        <div class="mb-2"><strong>Shipments / Quantity:</strong> <?= number_format($totals['shipment_count']) ?> / <?= number_format($totals['total_quantity']) ?></div>
+        <div class="mb-2"><strong>Current Trip:</strong> <?= $currentTrip ? h($currentTrip['trip_number'] . ' (' . $currentTrip['status'] . ', ' . $currentTrip['approval_status'] . ')') : '-' ?></div>
         <div class="mb-2"><strong>Tracking #:</strong> <?= h($container['tracking_number'] ?? '-') ?></div>
         <div class="mb-2"><strong>Seal #:</strong> <?= h($container['seal_number'] ?? '-') ?></div>
         <div class="mb-2"><strong>BL #:</strong> <?= h($container['bl_number'] ?? '-') ?></div>
@@ -305,6 +353,27 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['ajax_action'])) {
         <div class="mb-2"><strong>ETD / ETA Port:</strong> <?= h($container['etd_port'] ?? '-') ?> / <?= h($container['eta_port'] ?? '-') ?></div>
         <div class="mb-2"><strong>Customs Status:</strong> <?= h(ucfirst($container['customs_status'] ?? 'pending')) ?></div>
         <div class="mb-2"><strong>Notes:</strong> <?= nl2br(h($container['notes'] ?? '-')) ?></div>
+        <hr>
+        <h6>Manifest</h6>
+        <div class="table-responsive"><table class="table table-sm table-bordered">
+            <thead><tr><th>Shipment</th><th>Tracking</th><th>Customer / Sender</th><th>Receiver</th><th>Cargo</th><th>Qty</th><th>CBM</th><th>Weight</th><th>Route</th><th>Status</th></tr></thead>
+            <tbody>
+            <?php if ($manifestRows): foreach ($manifestRows as $m): ?>
+                <tr>
+                    <td><?= h($m['shipment_number']) ?></td><td><?= h($m['tracking_number']) ?></td>
+                    <td><?= h($m['customer_name'] ?: $m['sender_name'] ?: '-') ?></td>
+                    <td><?= h($m['receiver_name'] ?: '-') ?><?= !empty($m['receiver_phone']) ? '<br><small>' . h($m['receiver_phone']) . '</small>' : '' ?></td>
+                    <td><?= h($m['cargo_description']) ?></td>
+                    <td><?= (int)$m['quantity'] ?> <?= h($m['quantity_unit'] ?: 'Cartons') ?></td>
+                    <td><?= (float)$m['volume_cbm'] > 0 ? number_format((float)$m['cbm_used'], 4) : 'Not provided' ?></td><td><?= number_format((float)$m['weight_kg'], 2) ?></td>
+                    <td><?= h(($m['origin_name'] ?: '-') . ' → ' . ($m['destination_name'] ?: '-')) ?></td>
+                    <td><?= h(ucwords(strtolower(str_replace('_', ' ', $m['current_status'])))) ?></td>
+                </tr>
+            <?php endforeach; else: ?>
+                <tr><td colspan="10" class="text-center text-muted">No shipments loaded in this container.</td></tr>
+            <?php endif; ?>
+            </tbody>
+        </table></div>
         <?php
         jsonOut(['success' => true, 'html' => ob_get_clean(), 'container' => $container]);
     }
@@ -432,13 +501,13 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['ajax_action'])) {
             $syncedTripStatus = null;
             try {
                 if ($new_status === 'loaded') {
-                    $pdo->prepare("UPDATE trucking_trips SET status = 'loaded', loaded_at = NOW() WHERE container_id = ? AND tenant_id = ?")->execute([$id, $tenant_id]);
+                    $pdo->prepare("UPDATE trucking_trips SET status = 'loaded', loaded_at = NOW() WHERE container_id = ? AND tenant_id = ? AND status NOT IN ('delivered','completed')")->execute([$id, $tenant_id]);
                     $syncedTripStatus = 'loaded';
                 } elseif ($new_status === 'shipped' || $new_status === 'dispatched') {
-                    $pdo->prepare("UPDATE trucking_trips SET status = 'in_transit', departed_at = NOW() WHERE container_id = ? AND tenant_id = ?")->execute([$id, $tenant_id]);
+                    $pdo->prepare("UPDATE trucking_trips SET status = 'in_transit', departed_at = NOW() WHERE container_id = ? AND tenant_id = ? AND status NOT IN ('delivered','completed')")->execute([$id, $tenant_id]);
                     $syncedTripStatus = 'in_transit';
                 } elseif ($new_status === 'delivered') {
-                    $pdo->prepare("UPDATE trucking_trips SET status = 'completed', delivered_at = NOW() WHERE container_id = ? AND tenant_id = ?")->execute([$id, $tenant_id]);
+                    $pdo->prepare("UPDATE trucking_trips SET status = 'completed', delivered_at = NOW() WHERE container_id = ? AND tenant_id = ? AND status NOT IN ('completed')")->execute([$id, $tenant_id]);
                     $syncedTripStatus = 'completed';
                 }
             } catch (Throwable $e) {}

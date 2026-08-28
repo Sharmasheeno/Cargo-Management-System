@@ -467,9 +467,173 @@ require_once __DIR__ . '/../includes/header.php';
 </div>
 
 <script src="https://code.jquery.com/jquery-3.6.0.min.js"></script>
+<script>
+// [csrf-shim] inline jQuery pages need the same ajaxSetup guard that
+// includes/footer.php installs. Attach X-CSRF-Token to every same-origin
+// mutation from this page.
+(function () {
+    var m = document.querySelector('meta[name="csrf-token"]');
+    if (!m || !window.jQuery) return;
+    var token = m.getAttribute('content') || '';
+    jQuery.ajaxSetup({
+        beforeSend: function (xhr, settings) {
+            var method = (settings.type || 'GET').toUpperCase();
+            if (method === 'GET' || method === 'HEAD' || method === 'OPTIONS') return;
+            if (settings.crossDomain) return;
+            xhr.setRequestHeader('X-CSRF-Token', token);
+            if (settings.data instanceof FormData && !settings.data.has('csrf_token')) {
+                settings.data.append('csrf_token', token);
+            }
+        }
+    });
+
+// [async-error-shim] Standardize AJAX failure handling so every finance
+// page shows a controlled error instead of a permanent spinner. This
+// runs after the jQuery.ajaxSetup shim above, so both live on the same
+// jQuery instance.
+(function () {
+    if (!window.jQuery) return;
+    if (window.__FIN_ASYNC_SHIM__) return;
+    window.__FIN_ASYNC_SHIM__ = true;
+    // Install an ajaxSend handler that marks the click-source button
+    // with data-finance-pending. Fires once per shim install.
+    if (!window.__FIN_SEND_MARK__) {
+        window.__FIN_SEND_MARK__ = true;
+        jQuery(document).on('ajaxSend', function (event, xhr, settings) {
+            try {
+                if (!settings || settings.crossDomain) return;
+                var el = document.activeElement;
+                if (!el) return;
+                var tag = (el.tagName || '').toUpperCase();
+                if (tag !== 'BUTTON' && !(tag === 'INPUT' && (el.type || '').toLowerCase() === 'submit')) return;
+                var $el = jQuery(el);
+                // If it isn't disabled at the moment ajax fires, the
+                // caller isn't gating this button on the request, so
+                // don't mark it.
+                if (!$el.prop('disabled')) return;
+                if ($el.attr('data-finance-pending') === '1') return;
+                if ($el.attr('data-original-html') === undefined) {
+                    $el.attr('data-original-html', $el.html());
+                }
+                $el.attr('data-finance-pending', '1');
+            } catch (e) {}
+        });
+    }
+    jQuery(document).ajaxError(function (event, xhr, settings, thrownError) {
+        // Skip cross-domain or explicitly-suppressed calls.
+        if (settings && settings.crossDomain) return;
+        if (settings && settings.suppressGlobalError) return;
+        var msg;
+        try {
+            var body = xhr && xhr.responseText ? xhr.responseText : '';
+            var parsed = null;
+            try { parsed = body ? JSON.parse(body) : null; } catch (e) {}
+            if (parsed && parsed.message) msg = parsed.message;
+            else if (xhr && xhr.status === 0) msg = 'Network error — request could not complete';
+            else if (xhr && xhr.status === 403) msg = 'Not authorized (403)';
+            else if (xhr && xhr.status === 404) msg = 'Endpoint not found (404)';
+            else if (xhr && xhr.status >= 500) msg = 'Server error (' + xhr.status + ')';
+            else msg = 'Request failed' + (xhr && xhr.status ? ' (' + xhr.status + ')' : '');
+        } catch (e) {
+            msg = 'Request failed';
+        }
+        // Try Bootstrap toast first if present; fall back to alert.
+        try {
+            if (window.jQuery && window.jQuery.fn && window.jQuery.fn.toast) {
+                var $c = jQuery('#toast-container');
+                if (!$c.length) {
+                    $c = jQuery('<div id="toast-container" style="position:fixed;top:20px;right:20px;z-index:99999;"></div>').appendTo('body');
+                }
+                var $t = jQuery('<div class="alert alert-danger" role="alert" style="min-width:280px;box-shadow:0 2px 8px rgba(0,0,0,.15);">' + jQuery('<div/>').text(msg).html() + '</div>');
+                $c.append($t);
+                setTimeout(function () { $t.fadeOut(400, function(){ jQuery(this).remove(); }); }, 5000);
+                return;
+            }
+        } catch (e) {}
+                // [async-error-shim-v3] Targeted UI-state recovery. Only restores
+        // buttons that were explicitly marked at ajaxSend time with
+        // data-finance-pending="1" and whose original HTML was captured
+        // in data-original-html. Never touches other disabled controls —
+        // tenant-validation locks, RBAC locks, workflow gates, and
+        // missing-required-selection blockers all stay locked as
+        // intended.
+        try {
+            jQuery('[data-finance-pending="1"]').each(function () {
+                var $b = jQuery(this);
+                var orig = $b.attr('data-original-html');
+                if (orig !== undefined && orig !== null) $b.html(orig);
+                $b.prop('disabled', false);
+                $b.removeAttr('data-finance-pending');
+                $b.removeAttr('data-original-html');
+            });
+        } catch (e) {}
+        // Only alert once per 5-second window to prevent alert-storms.
+        if (!window.__FIN_ALERT_LOCK__) {
+            window.__FIN_ALERT_LOCK__ = true;
+            try { window.alert(msg); } catch (e) {}
+            setTimeout(function () { window.__FIN_ALERT_LOCK__ = false; }, 5000);
+        }
+    });
+})();
+})();
+</script>
 <script src="https://cdn.jsdelivr.net/npm/bootstrap@4.5.2/dist/js/bootstrap.bundle.min.js"></script>
 
 <script>
+// Canonical status maps — cover every lifecycle enum actually used by the
+// containers, trucking_trips, and shipments tables. Any status not present
+// here is rendered as the neutral "Unknown status" fallback and warned to
+// the console instead of literal "undefined".
+var STATUS_NAMES = {
+    // container lifecycle
+    'received':   'La Helay',
+    'loading':    'La Rarayaa',
+    'loaded':     'La Raray',
+    'shipped':    'La Diray',
+    'dispatched': 'La Diray',
+    'at_port':    'Dekedda',
+    'ready':      'Diyaar',
+    'delivered':  'La Gaarsiiyay',
+    // trucking_trips extra states
+    'pending':    'Sugaya',
+    'in_transit': 'Safar Kudhex Jira',
+    'completed':  'La Dhammeeyay',
+    // shipment life-cycle (varchar; uppercase in DB)
+    'REGISTERED':               'La Diiwaan Geliyay',
+    'RECEIVED':                 'La Helay',
+    'IN_ORIGIN_WAREHOUSE':      'Bakhaarka Bilowga',
+    'READY_FOR_LOADING':        'Diyaar Rarid',
+    'LOADED':                   'La Raray',
+    'IN_TRANSIT':               'Safar Kudhex Jira',
+    'ARRIVED_AT_DESTINATION':   'La Yimid Halka Loo Diray',
+    'IN_DESTINATION_WAREHOUSE': 'Bakhaarka Halka Loo Diray',
+    'READY_FOR_PICKUP':         'Diyaar Qaadid',
+    'OUT_FOR_DELIVERY':         'Loo Baxay Gudbin',
+    'DELIVERED':                'La Gaarsiiyay',
+    'CLOSED':                   'La Xiray',
+    'PARTIALLY_RECEIVED':       'Qayb Ka Ah La Helay',
+    'DAMAGED':                  'Waa La Xasuuqay'
+};
+var STATUS_COLORS = {
+    'received':'#17a2b8','loading':'#0dcaf0','loaded':'#ffc107','shipped':'#fd7e14',
+    'dispatched':'#fd7e14','at_port':'#6f42c1','ready':'#28a745','delivered':'#20c997',
+    'pending':'#6c757d','in_transit':'#0d6efd','completed':'#198754',
+    'REGISTERED':'#6c757d','RECEIVED':'#17a2b8','IN_ORIGIN_WAREHOUSE':'#0dcaf0',
+    'READY_FOR_LOADING':'#0dcaf0','LOADED':'#ffc107','IN_TRANSIT':'#0d6efd',
+    'ARRIVED_AT_DESTINATION':'#6f42c1','IN_DESTINATION_WAREHOUSE':'#6f42c1',
+    'READY_FOR_PICKUP':'#28a745','OUT_FOR_DELIVERY':'#0d6efd','DELIVERED':'#20c997',
+    'CLOSED':'#198754','PARTIALLY_RECEIVED':'#ffc107','DAMAGED':'#dc3545'
+};
+function statusLabel(s) {
+    if (s === null || s === undefined || s === '') return 'Unknown status';
+    if (Object.prototype.hasOwnProperty.call(STATUS_NAMES, s)) return STATUS_NAMES[s];
+    try { if (window.console) console.warn('[tracking] unmapped status:', s); } catch (e) {}
+    return 'Unknown status';
+}
+function statusColor(s) {
+    return (s && STATUS_COLORS[s]) ? STATUS_COLORS[s] : '#6c757d';
+}
+
 $(document).ready(function() {
     
     // Load stats
@@ -509,18 +673,11 @@ $(document).ready(function() {
                         html += '<h6 class="mb-3"><i class="fas fa-box"></i> Kontaynerada Ugu Dambeeyay</h6>';
                         html += '<table class="recent-table"><thead><tr><th>Kontaynerka</th><th>Tracking Number</th><th>Xaaladda</th><th>Shirkadda</th><th>Taariikhda</th></tr></thead><tbody>';
                         for (let c of data.containers) {
-                            const statusNames = {
-                                'received': 'La Helay', 'loaded': 'La Raray', 'dispatched': 'La Diray',
-                                'at_port': 'Dekedda', 'ready': 'Diyaar', 'delivered': 'La Gaarsiiyay'
-                            };
-                            const statusColors = {
-                                'received': '#17a2b8', 'loaded': '#ffc107', 'dispatched': '#fd7e14',
-                                'at_port': '#6f42c1', 'ready': '#28a745', 'delivered': '#20c997'
-                            };
+                            const _col = statusColor(c.status);
                             html += `<tr>
                                 <td><strong>${escapeHtml(c.container_number)}</strong></td>
                                 <td>${escapeHtml(c.tracking_number || '-')}</td>
-                                <td><span class="status-badge" style="background: ${statusColors[c.status]}20; color: ${statusColors[c.status]}">${statusNames[c.status]}</span></td>
+                                <td><span class="status-badge" style="background: ${_col}20; color: ${_col}">${escapeHtml(statusLabel(c.status))}</span></td>
                                 <td>${escapeHtml(c.tenant_name || '-')}</td>
                                 <td>${new Date(c.created_at).toLocaleDateString()}</td>
                             </tr>`;
@@ -532,18 +689,11 @@ $(document).ready(function() {
                         html += '<h6 class="mt-4 mb-3"><i class="fas fa-truck"></i> Safarada Ugu Dambeeyay</h6>';
                         html += '<table class="recent-table"><thead><tr><th>Lambarka Safarka</th><th>Kontaynerka</th><th>Xaaladda</th><th>Shirkadda</th><th>Taariikhda</th></tr></thead><tbody>';
                         for (let s of data.shipments) {
-                            const statusNames = {
-                                'received': 'La Helay', 'loaded': 'La Raray', 'dispatched': 'La Diray',
-                                'at_port': 'Dekedda', 'ready': 'Diyaar', 'delivered': 'La Gaarsiiyay'
-                            };
-                            const statusColors = {
-                                'received': '#17a2b8', 'loaded': '#ffc107', 'dispatched': '#fd7e14',
-                                'at_port': '#6f42c1', 'ready': '#28a745', 'delivered': '#20c997'
-                            };
+                            const _col = statusColor(s.status);
                             html += `<tr>
                                 <td><strong>${escapeHtml(s.trip_number)}</strong></td>
                                 <td>${escapeHtml(s.container_number || '-')}</td>
-                                <td><span class="status-badge" style="background: ${statusColors[s.status]}20; color: ${statusColors[s.status]}">${statusNames[s.status]}</span></td>
+                                <td><span class="status-badge" style="background: ${_col}20; color: ${_col}">${escapeHtml(statusLabel(s.status))}</span></td>
                                 <td>${escapeHtml(s.tenant_name || '-')}</td>
                                 <td>${new Date(s.created_at).toLocaleDateString()}</td>
                             </tr>`;
@@ -601,46 +751,39 @@ $(document).ready(function() {
     
     // Display container result (READ ONLY - NO EDIT)
     function displayContainerResult(container) {
-        const statusNames = {
-            'received': 'La Helay', 'loaded': 'La Raray', 'dispatched': 'La Diray',
-            'at_port': 'Dekedda', 'ready': 'Diyaar', 'delivered': 'La Gaarsiiyay'
-        };
-        const statusColors = {
-            'received': '#17a2b8', 'loaded': '#ffc107', 'dispatched': '#fd7e14',
-            'at_port': '#6f42c1', 'ready': '#28a745', 'delivered': '#20c997'
-        };
         const originNames = { 'china_yiwu': 'Shiinaha (Yiwu) 🇨🇳', 'china_guangzhou': 'Shiinaha (Guangzhou) 🇨🇳', 'dubai': 'Dubay 🇦🇪' };
-        
+
         const statusOrder = ['received', 'loaded', 'dispatched', 'at_port', 'ready', 'delivered'];
         const currentStatus = container.status;
         const currentIndex = statusOrder.indexOf(currentStatus);
-        
+        const _col = statusColor(currentStatus);
+
         let timelineHtml = '<div class="timeline">';
         for (let i = 0; i < statusOrder.length; i++) {
             const status = statusOrder[i];
             let statusClass = '';
             if (i < currentIndex) statusClass = 'completed';
             else if (i === currentIndex) statusClass = 'current';
-            
+
             timelineHtml += `
                 <div class="timeline-item">
                     <div class="timeline-dot ${statusClass}"></div>
                     <div class="timeline-content">
-                        <div class="timeline-title">${statusNames[status]}</div>
+                        <div class="timeline-title">${escapeHtml(statusLabel(status))}</div>
                         ${i === currentIndex ? '<div class="timeline-date">Xaaladda hadda</div>' : ''}
                     </div>
                 </div>
             `;
         }
         timelineHtml += '</div>';
-        
+
         const html = `
             <div class="result-card">
                 <div class="result-header">
                     <h3><i class="fas fa-box"></i> ${escapeHtml(container.container_number)}</h3>
                     <div>
-                        <span class="status-badge" style="background: ${statusColors[currentStatus]}20; color: ${statusColors[currentStatus]}; border: 1px solid ${statusColors[currentStatus]}">
-                            ${statusNames[currentStatus]}
+                        <span class="status-badge" style="background: ${_col}20; color: ${_col}; border: 1px solid ${_col}">
+                            ${escapeHtml(statusLabel(currentStatus))}
                         </span>
                         <span class="readonly-badge" style="margin-left: 10px;"><i class="fas fa-eye"></i> Aragti Keliya</span>
                     </div>
@@ -678,46 +821,38 @@ $(document).ready(function() {
     
     // Display shipment result (READ ONLY - NO EDIT)
     function displayShipmentResult(shipment) {
-        const statusNames = {
-            'received': 'La Helay', 'loaded': 'La Raray', 'dispatched': 'La Diray',
-            'at_port': 'Dekedda', 'ready': 'Diyaar', 'delivered': 'La Gaarsiiyay'
-        };
-        const statusColors = {
-            'received': '#17a2b8', 'loaded': '#ffc107', 'dispatched': '#fd7e14',
-            'at_port': '#6f42c1', 'ready': '#28a745', 'delivered': '#20c997'
-        };
-        
-        const statusOrder = ['received', 'loaded', 'dispatched', 'at_port', 'ready', 'delivered'];
+        const statusOrder = ['pending', 'received', 'loading', 'loaded', 'in_transit', 'delivered', 'completed'];
         const currentStatus = shipment.status;
         const currentIndex = statusOrder.indexOf(currentStatus);
-        
+        const _col = statusColor(currentStatus);
+
         let timelineHtml = '<div class="timeline">';
         for (let i = 0; i < statusOrder.length; i++) {
             const status = statusOrder[i];
             let statusClass = '';
             if (i < currentIndex) statusClass = 'completed';
             else if (i === currentIndex) statusClass = 'current';
-            
+
             timelineHtml += `
                 <div class="timeline-item">
                     <div class="timeline-dot ${statusClass}"></div>
                     <div class="timeline-content">
-                        <div class="timeline-title">${statusNames[status]}</div>
+                        <div class="timeline-title">${escapeHtml(statusLabel(status))}</div>
                         ${i === currentIndex ? '<div class="timeline-date">Xaaladda hadda</div>' : ''}
                     </div>
                 </div>
             `;
         }
         timelineHtml += '</div>';
-        
-        
+
+
         const html = `
             <div class="result-card">
                 <div class="result-header">
                     <h3><i class="fas fa-truck"></i> ${escapeHtml(shipment.trip_number)}</h3>
                     <div>
-                        <span class="status-badge" style="background: ${statusColors[currentStatus]}20; color: ${statusColors[currentStatus]}; border: 1px solid ${statusColors[currentStatus]}">
-                            ${statusNames[currentStatus]}
+                        <span class="status-badge" style="background: ${_col}20; color: ${_col}; border: 1px solid ${_col}">
+                            ${escapeHtml(statusLabel(currentStatus))}
                         </span>
                         <span class="readonly-badge" style="margin-left: 10px;"><i class="fas fa-eye"></i> Aragti Keliya</span>
                     </div>

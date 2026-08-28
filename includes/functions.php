@@ -96,6 +96,75 @@ function isLoggedIn() {
     return isset($_SESSION['user']['user_id']);
 }
 
+// ------------------------------------------------------------------------
+// Staff role_type groups (single source of truth)
+//
+// login.php stores the specific sub-role into $_SESSION['role'] as an alias
+// (see login.php's session-setting code), so a literal === 'staff' check
+// only matches the generic staff account and incorrectly locks out every
+// staff sub-role. Every staff/*.php page must instead check role_type
+// (falling back to role) against one of these groups.
+//
+// staffFamilyRoleTypes() - "is this any valid staff account at all" for
+//                          shared pages like dashboard and shipments.
+// The narrower helpers below match the real workflow ownership boundaries:
+// reception intake, physical warehouse custody, transport planning, finance.
+//
+// Adding a new staff role_type in the future only requires editing it
+// here - not hunting down every staff/*.php file that duplicated the list.
+// ------------------------------------------------------------------------
+if (!function_exists('staffFamilyRoleTypes')) {
+    function staffFamilyRoleTypes(): array {
+        return ['staff', 'reception_clerk', 'warehouse_supervisor', 'logistics_supervisor', 'finance_manager', 'clerk'];
+    }
+}
+
+if (!function_exists('staffReceptionRoleTypes')) {
+    function staffReceptionRoleTypes(): array {
+        return ['reception_clerk'];
+    }
+}
+
+if (!function_exists('staffWarehouseRoleTypes')) {
+    function staffWarehouseRoleTypes(): array {
+        return ['warehouse_supervisor'];
+    }
+}
+
+if (!function_exists('staffLogisticsRoleTypes')) {
+    function staffLogisticsRoleTypes(): array {
+        return ['logistics_supervisor'];
+    }
+}
+
+if (!function_exists('staffFinanceRoleTypes')) {
+    function staffFinanceRoleTypes(): array {
+        return ['finance_manager'];
+    }
+}
+
+if (!function_exists('roleDisplayName')) {
+    function roleDisplayName(?string $role_type): string {
+        $role_type = strtolower(trim((string)$role_type));
+        $labels = [
+            'superadmin' => 'Super Admin',
+            'company_admin' => 'Tenant Admin',
+            'tenant_admin' => 'Tenant Admin',
+            'branch_manager' => 'Branch Manager',
+            'reception_clerk' => 'Reception Clerk',
+            'warehouse_supervisor' => 'Warehouse Supervisor',
+            'logistics_supervisor' => 'Logistics Supervisor',
+            'finance_manager' => 'Finance Manager',
+            'delivery_agent' => 'Delivery Agent',
+            'driver' => 'Driver',
+            'customer' => 'Customer',
+            'clerk' => 'Assistant Worker',
+            'staff' => 'Staff',
+        ];
+        return $labels[$role_type] ?? ucwords(str_replace('_', ' ', $role_type));
+    }
+}
+
 // Redirect if not logged in
 function requireLogin() {
     if (!isLoggedIn()) {

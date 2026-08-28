@@ -105,7 +105,20 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['ajax_action'])) {
             {$whereSql}
             ORDER BY s.created_at DESC, s.id DESC LIMIT {$limit} OFFSET {$offset}");
         $dStmt->execute($params);
-        jsonOut(['success' => true, 'rows' => $dStmt->fetchAll(PDO::FETCH_ASSOC), 'total' => $total,
+        $rows = $dStmt->fetchAll(PDO::FETCH_ASSOC);
+        if ($current_role_type === 'clerk') {
+            foreach ($rows as &$row) {
+                unset(
+                    $row['storage_zone'],
+                    $row['storage_rack'],
+                    $row['current_warehouse_stock_id'],
+                    $row['active_zone'],
+                    $row['active_storage_location']
+                );
+            }
+            unset($row);
+        }
+        jsonOut(['success' => true, 'rows' => $rows, 'total' => $total,
                  'page' => $page, 'pages' => (int)ceil($total / $limit)]);
     }
 
@@ -131,6 +144,27 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['ajax_action'])) {
         if (!$ship) jsonOut(['success' => false, 'message' => 'Shipment not found in your branch scope.']);
         $ev = $pdo->prepare("SELECT e.*, b.branch_name FROM shipment_events e LEFT JOIN branches b ON b.id = e.branch_id WHERE e.shipment_id = ? ORDER BY e.created_at ASC, e.id ASC");
         $ev->execute([$id]);
+        if ($current_role_type === 'clerk') {
+            unset(
+                $ship['storage_zone'],
+                $ship['storage_rack'],
+                $ship['current_warehouse_stock_id'],
+                $ship['current_stock_zone'],
+                $ship['current_stock_location'],
+                $ship['current_stock_qty'],
+                $ship['current_stock_active']
+            );
+            jsonOut([
+                'success' => true,
+                'shipment' => $ship,
+                'events' => array_values(array_filter($ev->fetchAll(PDO::FETCH_ASSOC), static function ($e) {
+                    return (int)($e['is_public'] ?? 1) === 1;
+                })),
+                'stock_rows' => [],
+                'manifest_items' => [],
+                'releases' => [],
+            ]);
+        }
         $ws = $pdo->prepare("SELECT * FROM warehouse_stock WHERE shipment_id = ? AND tenant_id = ? ORDER BY id DESC");
         $ws->execute([$id, $tenant_id]);
         $mi = $pdo->prepare("SELECT cmi.*, c.container_number FROM cargo_manifest_items cmi LEFT JOIN containers c ON c.id = cmi.container_id WHERE cmi.master_shipment_id = ?");

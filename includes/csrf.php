@@ -2,6 +2,11 @@
 // includes/csrf.php
 // Shared CSRF protection helpers for admin mutations.
 //
+// Also transitively loads includes/sa_scope.php so that AJAX handlers
+// which include csrf.php (via require_csrf_token()) have access to the
+// Super Admin tenant-scope resolver without needing a second require.
+require_once __DIR__ . '/sa_scope.php';
+//
 // Usage:
 //   csrf_token()        -> returns the current per-session token (mints on first call)
 //   csrf_field()        -> outputs a hidden input <input name="csrf_token" ...>

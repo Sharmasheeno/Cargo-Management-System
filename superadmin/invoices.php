@@ -17,6 +17,15 @@ $role = $_SESSION['role'];
 $session_tenant_id = $_SESSION['tenant_id'] ?? 0;
 
 require_once __DIR__ . '/../config/db_connect.php';
+require_once __DIR__ . '/../includes/sa_scope.php';
+
+// Load the real double-entry AccountingService before the inline fallback
+// below. Without this require, the fallback class (which only writes to
+// audit_logs — never to journal_entries) took over, silently skipping
+// ledger posting from this page's invoice and payment flows.
+if (file_exists(__DIR__ . '/../includes/AccountingService.php')) {
+    require_once __DIR__ . '/../includes/AccountingService.php';
+}
 
 // Check if services exist, if not create fallbacks
 if (!class_exists('AccountingService')) {
@@ -309,7 +318,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['ajax_action'])) {
         $offset = ($page - 1) * $limit;
         
         $search = $_POST['search'] ?? '';
-        $tenant_filter = ($role === 'superadmin') ? (isset($_POST['tenant']) ? (int)$_POST['tenant'] : 0) : $session_tenant_id;
+        $tenant_filter = ($role === 'superadmin') ? (isset($_POST['tenant']) ? (int)$_POST['tenant'] : sa_selected_tenant_id_int()) : $session_tenant_id;
         $customer_filter = isset($_POST['customer']) ? (int)$_POST['customer'] : 0;
         $status_filter = $_POST['status'] ?? 'all';
         $date_from = $_POST['date_from'] ?? '';
@@ -541,7 +550,17 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['ajax_action'])) {
                 echo json_encode(['success' => false, 'message' => 'Biilka lama helin']);
                 exit;
             }
-            
+
+            // Super Admin tenant-scope guard: when operating under a selected
+            // tenant, refuse invoices that belong to a different tenant.
+            if (function_exists('sa_selected_tenant_id_int')) {
+                $sa_scope = sa_selected_tenant_id_int();
+                if ($sa_scope > 0 && (int)$invoice['tenant_id'] !== $sa_scope) {
+                    echo json_encode(['success' => false, 'message' => 'Invoice does not belong to the selected tenant.']);
+                    exit;
+                }
+            }
+
             $due_amount = $invoice['total_amount'] - $invoice['paid_amount'];
             
             if ($amount > $due_amount) {
@@ -577,10 +596,13 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['ajax_action'])) {
             $updateInv = $pdo->prepare("UPDATE invoices SET paid_amount = ?, status = ?, updated_at = NOW() WHERE id = ?");
             $updateInv->execute([$new_paid_amount, $new_status, $invoice_id]);
             
-            // Update customer debt
-            $updateDebt = $pdo->prepare("UPDATE customers SET debt_amount = debt_amount - ?, updated_at = NOW() WHERE id = ?");
-            $updateDebt->execute([$amount, $invoice['customer_id']]);
-            
+            // Customer debt is decremented by the DB trigger `trigger_update_debt`
+            // AFTER INSERT ON receipts (see the INSERT below). Doing it here as
+            // well caused a documented double-decrement — a paid customer would
+            // end at -total instead of 0. The trigger is authoritative because
+            // it also catches any other insert path (receipt_management, direct
+            // SQL, etc.). Do NOT re-add the manual decrement.
+
             // Add to cash_flow as inflow
             $cashStmt = $pdo->prepare("INSERT INTO cash_flow (tenant_id, flow_date, inflow, description, created_at) VALUES (?, ?, ?, ?, NOW())");
             $cashStmt->execute([$invoice['tenant_id'], $payment_date, $amount, "Bixin biilka: {$invoice['invoice_number']} - {$invoice['customer_name']}"]);
@@ -611,6 +633,39 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['ajax_action'])) {
             if (class_exists('AccountingService')) {
                 $accounting = new AccountingService($pdo, $invoice['tenant_id'], $_SESSION['user_id']);
                 $accounting->journalizeReceipt($new_receipt_id);
+            }
+
+            // Loyalty award — same formula api/loyalty.php uses:
+            //   points = round((amount / 100) * loyalty_amount_points, 2)
+            // Idempotent per payment via a WHERE loyalty_points_log check on
+            // (reference_type='payment', reference_id=$new_payment_id).
+            // Runs inside the outer transaction so a rolled-back payment
+            // never awards, and never awards twice.
+            try {
+                $rateStmt = $pdo->prepare("SELECT COALESCE(loyalty_amount_points, 0) AS rate FROM tenants WHERE id = ?");
+                $rateStmt->execute([$invoice['tenant_id']]);
+                $rate = (float)($rateStmt->fetchColumn() ?: 0);
+                if ($rate > 0 && !empty($invoice['customer_id'])) {
+                    $dupStmt = $pdo->prepare("SELECT id FROM loyalty_points_log WHERE reference_type='payment' AND reference_id = ? LIMIT 1");
+                    $dupStmt->execute([$new_payment_id]);
+                    if (!$dupStmt->fetchColumn()) {
+                        $points = round(((float)$amount / 100.0) * $rate, 2);
+                        if ($points > 0) {
+                            $pdo->prepare("UPDATE customers SET loyalty_points = COALESCE(loyalty_points, 0) + ? WHERE id = ? AND tenant_id = ?")
+                                ->execute([$points, $invoice['customer_id'], $invoice['tenant_id']]);
+                            $reason = "Payment #{$payment_number} - {$amount} / 100 x {$rate} = {$points} points";
+                            $pdo->prepare("INSERT INTO loyalty_points_log
+                                (tenant_id, customer_id, points_earned, points_redeemed, amount_earned, reason, reference_type, reference_id, created_by, created_at)
+                                VALUES (?, ?, ?, 0, ?, ?, 'payment', ?, ?, NOW())")
+                                ->execute([$invoice['tenant_id'], $invoice['customer_id'], $points, $amount, $reason, $new_payment_id, $_SESSION['user_id']]);
+                        }
+                    }
+                }
+            } catch (Throwable $e) {
+                error_log('[invoices add_payment loyalty] ' . $e->getMessage());
+                // Non-fatal — do NOT roll back the payment because of a
+                // loyalty write failure. The main receipt is already
+                // atomic; loyalty is a bonus.
             }
             
             LogAudit($pdo, 'ADD_PAYMENT', 'payments', $new_payment_id, null, ['amount' => $amount, 'invoice' => $invoice['invoice_number']]);
@@ -730,6 +785,21 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['ajax_action'])) {
 
         if (empty($customer_id)) {
             echo json_encode(['success' => false, 'message' => 'Fadlan dooro macaamil']);
+            exit;
+        }
+
+        // Super Admin tenant-scope guard: the invoice's tenant must match the
+        // selected scope, and the customer must belong to that tenant.
+        $sa_scope = function_exists('sa_selected_tenant_id_int') ? sa_selected_tenant_id_int() : 0;
+        if ($sa_scope > 0 && (int)$tenant_id !== $sa_scope) {
+            echo json_encode(['success' => false, 'message' => 'Selected tenant does not match the active scope.']);
+            exit;
+        }
+        $custStmt = $pdo->prepare("SELECT tenant_id FROM customers WHERE id = ?");
+        $custStmt->execute([$customer_id]);
+        $custTenant = $custStmt->fetchColumn();
+        if (!$custTenant || (int)$custTenant !== (int)$tenant_id) {
+            echo json_encode(['success' => false, 'message' => 'Customer does not belong to the selected tenant.']);
             exit;
         }
 
@@ -867,7 +937,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['ajax_action'])) {
     }
     
     elseif ($action === 'get_stats') {
-        $tenant_filter = isset($_POST['tenant']) ? (int)$_POST['tenant'] : 0;
+        $tenant_filter = isset($_POST['tenant']) ? (int)$_POST['tenant'] : sa_selected_tenant_id_int();
         $where = $tenant_filter > 0 ? "WHERE tenant_id = $tenant_filter" : "";
         
         $stmt = $pdo->query("
@@ -1453,6 +1523,116 @@ require_once __DIR__ . '/../includes/header.php';
 </div>
 
 <script src="https://code.jquery.com/jquery-3.6.0.min.js"></script>
+<script>
+// [csrf-shim] inline jQuery pages need the same ajaxSetup guard that
+// includes/footer.php installs. Attach X-CSRF-Token to every same-origin
+// mutation from this page.
+(function () {
+    var m = document.querySelector('meta[name="csrf-token"]');
+    if (!m || !window.jQuery) return;
+    var token = m.getAttribute('content') || '';
+    jQuery.ajaxSetup({
+        beforeSend: function (xhr, settings) {
+            var method = (settings.type || 'GET').toUpperCase();
+            if (method === 'GET' || method === 'HEAD' || method === 'OPTIONS') return;
+            if (settings.crossDomain) return;
+            xhr.setRequestHeader('X-CSRF-Token', token);
+            if (settings.data instanceof FormData && !settings.data.has('csrf_token')) {
+                settings.data.append('csrf_token', token);
+            }
+        }
+    });
+
+// [async-error-shim] Standardize AJAX failure handling so every finance
+// page shows a controlled error instead of a permanent spinner. This
+// runs after the jQuery.ajaxSetup shim above, so both live on the same
+// jQuery instance.
+(function () {
+    if (!window.jQuery) return;
+    if (window.__FIN_ASYNC_SHIM__) return;
+    window.__FIN_ASYNC_SHIM__ = true;
+    // Install an ajaxSend handler that marks the click-source button
+    // with data-finance-pending. Fires once per shim install.
+    if (!window.__FIN_SEND_MARK__) {
+        window.__FIN_SEND_MARK__ = true;
+        jQuery(document).on('ajaxSend', function (event, xhr, settings) {
+            try {
+                if (!settings || settings.crossDomain) return;
+                var el = document.activeElement;
+                if (!el) return;
+                var tag = (el.tagName || '').toUpperCase();
+                if (tag !== 'BUTTON' && !(tag === 'INPUT' && (el.type || '').toLowerCase() === 'submit')) return;
+                var $el = jQuery(el);
+                // If it isn't disabled at the moment ajax fires, the
+                // caller isn't gating this button on the request, so
+                // don't mark it.
+                if (!$el.prop('disabled')) return;
+                if ($el.attr('data-finance-pending') === '1') return;
+                if ($el.attr('data-original-html') === undefined) {
+                    $el.attr('data-original-html', $el.html());
+                }
+                $el.attr('data-finance-pending', '1');
+            } catch (e) {}
+        });
+    }
+    jQuery(document).ajaxError(function (event, xhr, settings, thrownError) {
+        // Skip cross-domain or explicitly-suppressed calls.
+        if (settings && settings.crossDomain) return;
+        if (settings && settings.suppressGlobalError) return;
+        var msg;
+        try {
+            var body = xhr && xhr.responseText ? xhr.responseText : '';
+            var parsed = null;
+            try { parsed = body ? JSON.parse(body) : null; } catch (e) {}
+            if (parsed && parsed.message) msg = parsed.message;
+            else if (xhr && xhr.status === 0) msg = 'Network error — request could not complete';
+            else if (xhr && xhr.status === 403) msg = 'Not authorized (403)';
+            else if (xhr && xhr.status === 404) msg = 'Endpoint not found (404)';
+            else if (xhr && xhr.status >= 500) msg = 'Server error (' + xhr.status + ')';
+            else msg = 'Request failed' + (xhr && xhr.status ? ' (' + xhr.status + ')' : '');
+        } catch (e) {
+            msg = 'Request failed';
+        }
+        // Try Bootstrap toast first if present; fall back to alert.
+        try {
+            if (window.jQuery && window.jQuery.fn && window.jQuery.fn.toast) {
+                var $c = jQuery('#toast-container');
+                if (!$c.length) {
+                    $c = jQuery('<div id="toast-container" style="position:fixed;top:20px;right:20px;z-index:99999;"></div>').appendTo('body');
+                }
+                var $t = jQuery('<div class="alert alert-danger" role="alert" style="min-width:280px;box-shadow:0 2px 8px rgba(0,0,0,.15);">' + jQuery('<div/>').text(msg).html() + '</div>');
+                $c.append($t);
+                setTimeout(function () { $t.fadeOut(400, function(){ jQuery(this).remove(); }); }, 5000);
+                return;
+            }
+        } catch (e) {}
+                // [async-error-shim-v3] Targeted UI-state recovery. Only restores
+        // buttons that were explicitly marked at ajaxSend time with
+        // data-finance-pending="1" and whose original HTML was captured
+        // in data-original-html. Never touches other disabled controls —
+        // tenant-validation locks, RBAC locks, workflow gates, and
+        // missing-required-selection blockers all stay locked as
+        // intended.
+        try {
+            jQuery('[data-finance-pending="1"]').each(function () {
+                var $b = jQuery(this);
+                var orig = $b.attr('data-original-html');
+                if (orig !== undefined && orig !== null) $b.html(orig);
+                $b.prop('disabled', false);
+                $b.removeAttr('data-finance-pending');
+                $b.removeAttr('data-original-html');
+            });
+        } catch (e) {}
+        // Only alert once per 5-second window to prevent alert-storms.
+        if (!window.__FIN_ALERT_LOCK__) {
+            window.__FIN_ALERT_LOCK__ = true;
+            try { window.alert(msg); } catch (e) {}
+            setTimeout(function () { window.__FIN_ALERT_LOCK__ = false; }, 5000);
+        }
+    });
+})();
+})();
+</script>
 <script src="https://cdn.jsdelivr.net/npm/bootstrap@4.5.2/dist/js/bootstrap.bundle.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 <script>
